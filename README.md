@@ -82,7 +82,7 @@ uberepo prune --force
 
 | Command | Arguments / flags | What it does |
 | --- | --- | --- |
-| `init` | `[name]` | Create the workspace manifest. With a name, creates `<name>/uberepo.json`; without, uses the current directory. |
+| `init` | `[name]` `[--no-agents]` | Create the workspace manifest. With a name, creates `<name>/uberepo.json`; without, uses the current directory. Also seeds `AGENTS.md` + `CLAUDE.md` to brief AI agents on the workspace (`--no-agents` to skip; never overwrites an existing one). |
 | `add` | `<repository>` | Register a repo URL. Validates and normalizes the URL; detects duplicates by identity, so SSH and HTTPS forms of the same repo never double-add. |
 | `remove` | `<repository>` | Unregister a repo, matched by that same identity — any URL form works. |
 | `sources` | — | List registered repositories and whether each is cloned into `source/`. |
