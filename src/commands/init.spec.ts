@@ -24,7 +24,7 @@ describe("init command", () => {
     })
 
     it("creates uberepo.json with the default config bytes", async () => {
-        await init.run({})
+        await init.run({ name: undefined })
         const written = await fsp.readFile(configPath, "utf8")
         expect(written).toBe(`{\n    "repositories": []\n}\n`)
     })
@@ -35,7 +35,7 @@ describe("init command", () => {
 
         let error: unknown
         try {
-            await init.run({})
+            await init.run({ name: undefined })
         } catch (e) {
             error = e
         }
@@ -47,5 +47,45 @@ describe("init command", () => {
         expect((error as Error).message).toContain("refusing to overwrite.")
 
         expect(await fsp.readFile(configPath, "utf8")).toBe(existing)
+    })
+
+    it("creates <name>/uberepo.json with the default bytes, making the dir", async () => {
+        await init.run({ name: "lokalise-workdir" })
+        const written = await fsp.readFile(
+            path.join(tmp, "lokalise-workdir", CONFIG_FILENAME),
+            "utf8"
+        )
+        expect(written).toBe(`{\n    "repositories": []\n}\n`)
+        // The bare-cwd manifest must NOT have been written.
+        await expect(fsp.access(configPath)).rejects.toThrow()
+    })
+
+    it("creates a nested <name>/uberepo.json, making parent dirs", async () => {
+        await init.run({ name: path.join("a", "b") })
+        const written = await fsp.readFile(
+            path.join(tmp, "a", "b", CONFIG_FILENAME),
+            "utf8"
+        )
+        expect(written).toBe(`{\n    "repositories": []\n}\n`)
+    })
+
+    it("throws and leaves <name>/uberepo.json untouched when it exists", async () => {
+        const dir = path.join(tmp, "lokalise-workdir")
+        await fsp.mkdir(dir, { recursive: true })
+        const existing = `{\n    "repositories": ["keep"]\n}\n`
+        const target = path.join(dir, CONFIG_FILENAME)
+        await fsp.writeFile(target, existing)
+
+        let error: unknown
+        try {
+            await init.run({ name: "lokalise-workdir" })
+        } catch (e) {
+            error = e
+        }
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).message).toContain(CONFIG_FILENAME)
+        expect((error as Error).message).toContain("refusing to overwrite.")
+
+        expect(await fsp.readFile(target, "utf8")).toBe(existing)
     })
 })
