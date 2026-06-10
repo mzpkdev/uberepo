@@ -4,8 +4,10 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { promisify } from "node:util"
 import { terminal } from "cmdore"
+import { vi } from "vitest"
 import status from "@/commands/status"
 import { CONFIG_FILENAME } from "@/config"
+import type { Task } from "@/tasks"
 
 const exec = promisify(execFile)
 
@@ -58,6 +60,10 @@ describe("status command", () => {
     })
 
     afterEach(async () => {
+        // jsonMode is global state on the shared `terminal` export; leaking it
+        // true would silence terminal.log in every other suite. Always reset.
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -212,5 +218,124 @@ describe("status command", () => {
             process.chdir(root)
             await fsp.rm(orphan, { recursive: true, force: true })
         }
+    })
+
+    // Run `fn` with jsonMode enabled, capturing everything written to stdout.
+    // Resets jsonMode in finally before any assertion can throw, so a failing
+    // expect() never leaks jsonMode true into sibling suites.
+    const captureJson = async (fn: () => Promise<void>): Promise<string[]> => {
+        const written: string[] = []
+        vi.spyOn(process.stdout, "write").mockImplementation(
+            (chunk: string | Uint8Array): boolean => {
+                written.push(chunk.toString())
+                return true
+            }
+        )
+        terminal.jsonMode = true
+        try {
+            await fn()
+        } finally {
+            terminal.jsonMode = false
+        }
+        return written
+    }
+
+    it("emits the full Task[] under --json and leaks no human lines", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        await openWorktree("api", "alpha")
+        await openWorktree("web", "alpha")
+        await openWorktree("api", "beta")
+
+        const written = await captureJson(async () => {
+            await status.run({ task: undefined })
+        })
+
+        const output = written.join("")
+        // Exactly one write — the single JSON line — proves no human heading or
+        // per-repo column line leaked to stdout (those go through terminal.log,
+        // which jsonMode silences).
+        expect(written).toEqual([output])
+        expect(output.endsWith("\n")).toBe(true)
+        // A leaked human line would carry the "clean"/"dirty" state words; the
+        // JSON only has them as the `dirty` key, never the literal "clean".
+        expect(output).not.toContain("clean")
+
+        const parsed = JSON.parse(output) as Task[]
+        expect(parsed).toEqual([
+            {
+                name: "alpha",
+                repos: [
+                    { name: "api", branch: "task/alpha", dirty: false },
+                    { name: "web", branch: "task/alpha", dirty: false }
+                ]
+            },
+            {
+                name: "beta",
+                repos: [{ name: "api", branch: "task/beta", dirty: false }]
+            }
+        ])
+    })
+
+    it("emits only the named task as a single-element array under --json", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+        await openWorktree("api", "beta")
+
+        const written = await captureJson(async () => {
+            await status.run({ task: "beta" })
+        })
+
+        const parsed = JSON.parse(written.join("")) as Task[]
+        expect(parsed).toEqual([
+            {
+                name: "beta",
+                repos: [{ name: "api", branch: "task/beta", dirty: false }]
+            }
+        ])
+    })
+
+    it("reflects a dirty worktree in the JSON payload", async () => {
+        await makeSource("api")
+        await register(["api"])
+        const wt = await openWorktree("api", "alpha")
+        await fsp.writeFile(path.join(wt, "README.md"), "uncommitted\n")
+
+        const written = await captureJson(async () => {
+            await status.run({ task: undefined })
+        })
+
+        const parsed = JSON.parse(written.join("")) as Task[]
+        expect(parsed).toEqual([
+            {
+                name: "alpha",
+                repos: [{ name: "api", branch: "task/alpha", dirty: true }]
+            }
+        ])
+    })
+
+    it("emits an empty array under --json when there are no open tasks", async () => {
+        await makeSource("api")
+        await register(["api"])
+
+        const written = await captureJson(async () => {
+            await status.run({ task: undefined })
+        })
+
+        expect(JSON.parse(written.join(""))).toEqual([])
+    })
+
+    it("emits an empty array under --json for a task that does not exist", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+
+        const written = await captureJson(async () => {
+            await status.run({ task: "ghost" })
+        })
+
+        expect(JSON.parse(written.join(""))).toEqual([])
     })
 })

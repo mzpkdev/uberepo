@@ -1,17 +1,40 @@
+import * as fs from "node:fs"
+import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { CONFIG_FILENAME, Config } from "@/config"
+import { normalizeRepository } from "@/url"
 
 export default defineCommand({
     name: "sources",
-    description: "List the source repositories registered in the workspace",
+    description:
+        "List the registered repositories and whether each is cloned into source/",
     async run() {
         const config = await Config.read()
-        if (config.repositories.length === 0) {
+        const root = await Config.root()
+        const rows = config.repositories.map((url) => {
+            const { name } = normalizeRepository(url)
+            return {
+                name,
+                url,
+                cloned: fs.existsSync(path.join(root, "source", name))
+            }
+        })
+
+        terminal.json(rows)
+
+        if (rows.length === 0) {
             terminal.log(`No repositories registered in ${CONFIG_FILENAME}.`)
             return
         }
-        for (const repo of config.repositories) {
-            terminal.log(repo)
+        const width = Math.max(...rows.map((r) => r.name.length))
+        for (const r of rows) {
+            terminal.log(
+                `${r.cloned ? "✓" : "—"} ${r.name.padEnd(width)}  ${r.url}`
+            )
         }
+        const cloned = rows.filter((r) => r.cloned).length
+        terminal.log(
+            `\n${rows.length} registered · ${cloned} cloned · ${rows.length - cloned} missing`
+        )
     }
 })

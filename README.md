@@ -85,7 +85,7 @@ uberepo prune --force
 | `init` | `[name]` | Create the workspace manifest. With a name, creates `<name>/uberepo.json`; without, uses the current directory. |
 | `add` | `<repository>` | Register a repo URL. Validates and normalizes the URL; detects duplicates by identity, so SSH and HTTPS forms of the same repo never double-add. |
 | `remove` | `<repository>` | Unregister a repo, matched by that same identity — any URL form works. |
-| `sources` | — | List the registered repositories. |
+| `sources` | — | List registered repositories and whether each is cloned into `source/`. |
 | `clone` | — | Clone every registered repo into `source/<name>`. Skips already-cloned repos; fails fast on a missing credential instead of hanging on an auth prompt. |
 | `status` | `[task]` | Show open tasks and each worktree's branch and clean/dirty state. Optional task filter. |
 | `open` | `<task>` `[--from <ref>]` | Create the task's worktree (branch `task/<task>`) in every cloned repo, branched off each clone's current `HEAD` or `--from <ref>`. Idempotent. |
@@ -93,7 +93,7 @@ uberepo prune --force
 | `sync` | `<task>` `[--from <ref>]` | Fetch and rebase each of the task's worktrees onto the repo's fresh remote default branch, or `--from <ref>`. Stops at the first conflict for you to resolve. |
 | `prune` | `[--force]` | Find tasks whose branches are fully merged and clean. Previews them by default; removes worktrees and branches with `--force`. |
 
-`--from` is aliased `-b`; `--force` is aliased `-f`.
+`--from` is aliased `-b`; `--force` is aliased `-f`. Any command accepts `--json` for machine-readable output.
 
 ## Workspace layout
 

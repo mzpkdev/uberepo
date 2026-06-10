@@ -14,8 +14,16 @@ export default defineCommand({
     async run(argv) {
         const tasks = await openTasks()
 
+        // The exact set the human view renders: every task, or just the named
+        // one when filtered. JSON emits this same list so both views agree
+        // (nonexistent task / no open tasks -> []).
+        const shown = argv.task
+            ? tasks.filter((t) => t.name === argv.task)
+            : tasks
+        terminal.json(shown)
+
         if (argv.task) {
-            const wanted = tasks.find((t) => t.name === argv.task)
+            const wanted = shown[0]
             if (!wanted) {
                 terminal.log(`No such open task: ${argv.task}`)
                 return
