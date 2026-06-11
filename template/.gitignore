@@ -1,0 +1,5 @@
+# uberepo workspace — source clones and task worktrees rebuild from uberepo.json
+source/
+tasks/
+
+.DS_Store

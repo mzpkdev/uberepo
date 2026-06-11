@@ -6,6 +6,34 @@ import { CONFIG_FILENAME } from "@/config"
 
 const AGENTS_FILENAME = "AGENTS.md"
 const CLAUDE_FILENAME = "CLAUDE.md"
+const GITIGNORE_FILENAME = ".gitignore"
+// The skill lives in the repo at template/.claude/skills/using-uberepo/ and init
+// stamps it verbatim to the same relative path in the workspace. So this is both
+// the template source we READ and the stamped target we ASSERT against.
+const SKILL_REL = path.join(".claude", "skills", "using-uberepo", "SKILL.md")
+// The skill splits depth into a sibling reference.md (progressive disclosure);
+// the recursive stamp copies it verbatim alongside SKILL.md.
+const SKILL_REF_REL = path.join(
+    ".claude",
+    "skills",
+    "using-uberepo",
+    "reference.md"
+)
+// The same skill also ships under .agents/ — a cross-tool copy read by Codex and
+// Gemini (which look in .agents/skills/, not .claude/skills/). init stamps it
+// verbatim too, so these are likewise both the READ source and the ASSERT target.
+const AGENT_SKILL_REL = path.join(
+    ".agents",
+    "skills",
+    "using-uberepo",
+    "SKILL.md"
+)
+const AGENT_SKILL_REF_REL = path.join(
+    ".agents",
+    "skills",
+    "using-uberepo",
+    "reference.md"
+)
 
 // The on-disk template/ files are the single source of truth for what init
 // stamps — read them straight off disk (resolved relative to this spec, the
@@ -20,6 +48,11 @@ describe("init command", () => {
     let configPath: string
     let agentsTemplate: string
     let claudeTemplate: string
+    let gitignoreTemplate: string
+    let skillTemplate: string
+    let skillRefTemplate: string
+    let agentSkillTemplate: string
+    let agentSkillRefTemplate: string
 
     beforeAll(async () => {
         agentsTemplate = await fsp.readFile(
@@ -28,6 +61,26 @@ describe("init command", () => {
         )
         claudeTemplate = await fsp.readFile(
             path.join(TEMPLATE_DIR, CLAUDE_FILENAME),
+            "utf8"
+        )
+        gitignoreTemplate = await fsp.readFile(
+            path.join(TEMPLATE_DIR, GITIGNORE_FILENAME),
+            "utf8"
+        )
+        skillTemplate = await fsp.readFile(
+            path.join(TEMPLATE_DIR, SKILL_REL),
+            "utf8"
+        )
+        skillRefTemplate = await fsp.readFile(
+            path.join(TEMPLATE_DIR, SKILL_REF_REL),
+            "utf8"
+        )
+        agentSkillTemplate = await fsp.readFile(
+            path.join(TEMPLATE_DIR, AGENT_SKILL_REL),
+            "utf8"
+        )
+        agentSkillRefTemplate = await fsp.readFile(
+            path.join(TEMPLATE_DIR, AGENT_SKILL_REF_REL),
             "utf8"
         )
     })
@@ -57,7 +110,7 @@ describe("init command", () => {
         expect(written).toBe(`{\n    "repositories": []\n}\n`)
     })
 
-    it("stamps AGENTS.md and CLAUDE.md in cwd alongside uberepo.json", async () => {
+    it("stamps AGENTS.md, CLAUDE.md, and .gitignore in cwd alongside uberepo.json", async () => {
         await init.run({ name: undefined, "no-agents": false })
 
         expect(await fsp.readFile(configPath, "utf8")).toBe(
@@ -71,9 +124,37 @@ describe("init command", () => {
         expect(
             await fsp.readFile(path.join(tmp, CLAUDE_FILENAME), "utf8")
         ).toBe(claudeTemplate)
+        // .gitignore keeps a committed workspace clean; stamped on every init.
+        expect(
+            await fsp.readFile(path.join(tmp, GITIGNORE_FILENAME), "utf8")
+        ).toBe(gitignoreTemplate)
     })
 
-    it("stamps AGENTS.md and CLAUDE.md into <name>/ with uberepo.json", async () => {
+    it("stamps the bundled Claude skill at .claude/skills/using-uberepo/SKILL.md", async () => {
+        await init.run({ name: undefined, "no-agents": false })
+
+        // The recursive stamp copies the nested skill verbatim to the same
+        // relative path; SKILL.md lands byte-for-byte in the workspace.
+        expect(await fsp.readFile(path.join(tmp, SKILL_REL), "utf8")).toBe(
+            skillTemplate
+        )
+        // ...and so does the skill's sibling reference.md — the recursive walk
+        // copies every file in the skill dir, not just SKILL.md.
+        expect(await fsp.readFile(path.join(tmp, SKILL_REF_REL), "utf8")).toBe(
+            skillRefTemplate
+        )
+        // The cross-tool copy under .agents/ (read by Codex & Gemini) stamps the
+        // same way — SKILL.md byte-for-byte at its mirrored relative path.
+        expect(
+            await fsp.readFile(path.join(tmp, AGENT_SKILL_REL), "utf8")
+        ).toBe(agentSkillTemplate)
+        // ...and its sibling reference.md too, for the same recursive reason.
+        expect(
+            await fsp.readFile(path.join(tmp, AGENT_SKILL_REF_REL), "utf8")
+        ).toBe(agentSkillRefTemplate)
+    })
+
+    it("stamps AGENTS.md, CLAUDE.md, and .gitignore into <name>/ with uberepo.json", async () => {
         await init.run({ name: "lokalise-workdir", "no-agents": false })
         const dir = path.join(tmp, "lokalise-workdir")
 
@@ -86,19 +167,35 @@ describe("init command", () => {
         expect(
             await fsp.readFile(path.join(dir, CLAUDE_FILENAME), "utf8")
         ).toBe(claudeTemplate)
+        expect(
+            await fsp.readFile(path.join(dir, GITIGNORE_FILENAME), "utf8")
+        ).toBe(gitignoreTemplate)
     })
 
-    it("writes only uberepo.json when --no-agents is set", async () => {
+    it("stamps .gitignore but not AGENTS.md/CLAUDE.md when --no-agents is set", async () => {
         await init.run({ name: undefined, "no-agents": true })
 
         expect(await fsp.readFile(configPath, "utf8")).toBe(
             `{\n    "repositories": []\n}\n`
         )
+        // The carve-out: .gitignore is workspace hygiene, decoupled from the
+        // agent-files opt-out — so it still lands, byte-for-byte.
+        expect(
+            await fsp.readFile(path.join(tmp, GITIGNORE_FILENAME), "utf8")
+        ).toBe(gitignoreTemplate)
+        // ...while the agent context files are suppressed.
         await expect(
             fsp.access(path.join(tmp, AGENTS_FILENAME))
         ).rejects.toThrow()
         await expect(
             fsp.access(path.join(tmp, CLAUDE_FILENAME))
+        ).rejects.toThrow()
+        // ...and so is the whole .claude/ skill tree — the dir isn't created.
+        await expect(fsp.access(path.join(tmp, ".claude"))).rejects.toThrow()
+        // ...and the cross-tool .agents/ skill copy is suppressed too — its
+        // SKILL.md never lands when --no-agents holds back the .agents/ subtree.
+        await expect(
+            fsp.access(path.join(tmp, AGENT_SKILL_REL))
         ).rejects.toThrow()
     })
 
@@ -119,6 +216,48 @@ describe("init command", () => {
         expect(
             await fsp.readFile(path.join(tmp, CLAUDE_FILENAME), "utf8")
         ).toBe(claudeTemplate)
+    })
+
+    it("leaves an existing .gitignore untouched but still stamps the rest", async () => {
+        const custom = "# my own ignore rules\nbuild/\n"
+        await fsp.writeFile(path.join(tmp, GITIGNORE_FILENAME), custom)
+
+        await init.run({ name: undefined, "no-agents": false })
+
+        // The user's .gitignore is preserved verbatim — never clobbered.
+        expect(
+            await fsp.readFile(path.join(tmp, GITIGNORE_FILENAME), "utf8")
+        ).toBe(custom)
+        // ...but the agent files are still created.
+        expect(
+            await fsp.readFile(path.join(tmp, AGENTS_FILENAME), "utf8")
+        ).toBe(agentsTemplate)
+        expect(
+            await fsp.readFile(path.join(tmp, CLAUDE_FILENAME), "utf8")
+        ).toBe(claudeTemplate)
+    })
+
+    it("leaves an existing nested skill file untouched but still stamps the rest", async () => {
+        const custom = "---\ndescription: mine\n---\n\n# my own skill\n"
+        const skillTarget = path.join(tmp, SKILL_REL)
+        await fsp.mkdir(path.dirname(skillTarget), { recursive: true })
+        await fsp.writeFile(skillTarget, custom)
+
+        await init.run({ name: undefined, "no-agents": false })
+
+        // The user's nested SKILL.md is preserved verbatim — the recursive
+        // skip-if-exists guards deep paths, not just top-level files.
+        expect(await fsp.readFile(skillTarget, "utf8")).toBe(custom)
+        // ...but the rest of the template still lands.
+        expect(await fsp.readFile(configPath, "utf8")).toBe(
+            `{\n    "repositories": []\n}\n`
+        )
+        expect(
+            await fsp.readFile(path.join(tmp, AGENTS_FILENAME), "utf8")
+        ).toBe(agentsTemplate)
+        expect(
+            await fsp.readFile(path.join(tmp, GITIGNORE_FILENAME), "utf8")
+        ).toBe(gitignoreTemplate)
     })
 
     it("throws and leaves the existing config untouched when one exists", async () => {

@@ -1,5 +1,8 @@
 <p align="center">
-  <strong>uberepo</strong><br>
+  <img src=".github/assets/banner.svg" alt="uberepo — switch tasks, not branches" width="100%">
+</p>
+
+<p align="center">
   One workspace for all your repos. Built for local dev.
 </p>
 
@@ -82,11 +85,12 @@ uberepo prune --force
 
 | Command | Arguments / flags | What it does |
 | --- | --- | --- |
-| `init` | `[name]` `[--no-agents]` | Create the workspace manifest. With a name, creates `<name>/uberepo.json`; without, uses the current directory. Also seeds `AGENTS.md` + `CLAUDE.md` to brief AI agents on the workspace (`--no-agents` to skip; never overwrites an existing one). |
+| `init` | `[name]` `[--no-agents]` | Create the workspace manifest. With a name, creates `<name>/uberepo.json`; without, uses the current directory. Also seeds a `.gitignore` so the workspace is commit-ready and shareable, plus `AGENTS.md` + `CLAUDE.md` and a `using-uberepo` agent skill — stamped for Claude Code (`.claude/skills/`) and cross-tool agents (`.agents/skills/`, read by Codex & Gemini) — to brief AI agents on the workspace (`--no-agents` skips all of that AI context; never overwrites an existing file). |
 | `add` | `<repository>` | Register a repo URL. Validates and normalizes the URL; detects duplicates by identity, so SSH and HTTPS forms of the same repo never double-add. |
 | `remove` | `<repository>` | Unregister a repo, matched by that same identity — any URL form works. |
 | `sources` | — | List registered repositories and whether each is cloned into `source/`. |
 | `clone` | — | Clone every registered repo into `source/<name>`. Skips already-cloned repos; fails fast on a missing credential instead of hanging on an auth prompt. |
+| `pull` | — | Fast-forward every cloned source repo to its origin (ff-only; skips dirty/diverged). |
 | `status` | `[task]` | Show open tasks and each worktree's branch and clean/dirty state. Optional task filter. |
 | `open` | `<task>` `[--from <ref>]` | Create the task's worktree (branch `task/<task>`) in every cloned repo, branched off each clone's current `HEAD` or `--from <ref>`. Idempotent. |
 | `close` | `<task>` `[--force]` | Remove the task's worktrees and delete its branch. Skips any repo with uncommitted or unmerged work unless `--force`; closes the safe ones and reports the rest. |

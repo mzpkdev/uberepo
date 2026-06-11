@@ -1,49 +1,26 @@
 # Working in this uberepo workspace
 
-**TL;DR:** repos live in `source/`, you work in per-task worktrees under
-`tasks/<task>/`, and you drive it with the `uberepo` CLI — never by hand.
-First move: `uberepo status` (what's open) + `uberepo sources` (the repos).
-`uberepo --help` lists every command and flag.
+Several git repos managed together via the `uberepo` CLI. Each *task* gets its own
+worktree in every repo — work across them at once, switch tasks by switching dirs,
+never by hand. First move: `uberepo status` + `uberepo sources`.
 
 ## Layout
 
     <workspace>/
-    ├── uberepo.json          # manifest: the registered repositories
-    ├── source/<name>/        # canonical clone of each repo — DON'T work here
-    └── tasks/<task>/<name>/  # per-task worktree of each repo, on branch task/<task>
+    ├── uberepo.json          # the registered repositories
+    ├── source/<name>/        # canonical clone — read-only, don't work here
+    └── tasks/<task>/<name>/  # per-task worktree, on branch task/<task> — work here
 
-If your CWD is under `tasks/<task>/`, you're already in a task worktree — commit
-there. `source/` is the shared base clone; leave it alone.
+## Rules
 
-## One task = one branch across every repo
+- **Work in `tasks/<task>/`, never in `source/`.** That's where edits, commits, and
+  pushes happen — per repo (uberepo doesn't push for you). `source/` is the shared base.
+- **Don't manage repos or worktrees by hand** — use the commands, not `git clone` /
+  `git worktree` / a hand-edited `uberepo.json`. They guard unsaved work; raw git doesn't.
+- **Each repo speaks for itself** — inside a repo's worktree, follow that repo's own
+  `AGENTS.md` / `README`. This file only covers the workspace.
 
-`uberepo open <task>` makes a `tasks/<task>/<name>/` worktree on branch
-`task/<task>` in EVERY cloned repo. Switch tasks by switching directories, not by
-`git checkout`.
+## Going deeper
 
-## Each repo speaks for itself
-
-Inside a repo's worktree, follow THAT repo's own `AGENTS.md` / `README` for build,
-test, and style. This file only covers the workspace.
-
-## Workflow
-
-    uberepo open <task>     # worktree + task/<task> branch in every repo
-    # work, then commit IN EACH repo's worktree (tasks/<task>/<name>/)
-    uberepo sync <task>     # fetch + rebase the task onto each repo's fresh default
-    uberepo close <task>    # remove worktrees + delete the branch when done
-
-- Commit and push **per repo**, inside its worktree — uberepo does NOT commit or push for you.
-- If `sync` hits a conflict it STOPS and leaves that repo mid-rebase: resolve there, then re-run.
-
-## Live state — parse --json, don't scrape text
-
-    uberepo sources --json   # registered repos + cloned-or-not
-    uberepo status --json    # open tasks, each worktree's branch + clean/dirty
-
-## Don't
-
-- Don't edit/commit/branch in `source/` — work in `tasks/<task>/`.
-- Don't hand-edit `uberepo.json` — use `add` / `remove`.
-- Don't `rm` task dirs or run raw `git worktree` — use `open` / `close` (they guard unsaved work).
-- Don't `--force` past a refusal unless the work is genuinely saved.
+`uberepo --help` lists every command and flag. Claude Code: the `using-uberepo` skill
+in `.claude/skills/` carries the full lifecycle (open → sync → close), recovery, and sharing.

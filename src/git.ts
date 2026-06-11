@@ -45,8 +45,26 @@ export class Repository {
         await run(["rebase", onto], this.path)
     }
 
+    // Fast-forward the current branch to its configured upstream. `--ff-only`
+    // makes git refuse anything but a fast-forward — no upstream, or a diverged
+    // branch that would need a merge commit, fails with a GitError instead of
+    // merging. source/<name> is a read-only base (work happens in task
+    // worktrees), so it should only ever advance, never gain a merge commit.
+    async pull(): Promise<void> {
+        await run(["pull", "--ff-only"], this.path)
+    }
+
     async raw(...args: string[]): Promise<string> {
         return (await run(args, this.path)).trim()
+    }
+
+    // True when the repository has uncommitted changes (staged, unstaged, or
+    // untracked). `git status --porcelain` prints one line per change and
+    // nothing when the tree is clean, so non-empty output means dirty. Mirrors
+    // Worktree.dirty() for the repo's own working tree.
+    async dirty(): Promise<boolean> {
+        const out = await run(["status", "--porcelain"], this.path)
+        return out.trim().length > 0
     }
 
     // The remote default branch as a ref (e.g. "origin/main"), resolved from
