@@ -72,7 +72,7 @@ Removes the worktrees and deletes the `task/<task>` branch in every repo.
 | Command | Effect |
 | --- | --- |
 | `uberepo init [name]` | Create a new workspace (manifest + agent files). |
-| `uberepo add <url>` | Register a repo. |
+| `uberepo add <url>...` | Register one or more repos in one call. |
 | `uberepo remove <url>` | Unregister a repo. |
 | `uberepo clone` | Clone every registered repo into `source/<name>` (skips ones already cloned). |
 | `uberepo pull` | Fast-forward every cloned repo in `source/` to its origin (skips dirty or diverged repos). |

@@ -1,25 +1,42 @@
 import { defineCommand, terminal } from "cmdore"
-import { repository } from "@/arguments/repository"
+import { repositories } from "@/arguments/repositories"
 import { CONFIG_FILENAME, Config } from "@/config"
 import { normalizeRepository } from "@/url"
 
 export default defineCommand({
     name: "add",
-    description: "Add a repository to the uberepo workspace",
-    arguments: [repository],
+    description: "Add one or more repositories to the uberepo workspace",
+    arguments: [repositories],
     async run(argv) {
         const config = await Config.read()
-        const { url, key } = normalizeRepository(argv.repository)
-        const clash = config.repositories.some(
-            (r) => normalizeRepository(r).key === key
+        // Validate every URL first so a single bad one writes nothing.
+        const normalized = argv.repositories.map(normalizeRepository)
+        const seen = new Set(
+            config.repositories.map((r) => normalizeRepository(r).key)
         )
-        if (clash) {
-            terminal.warn(`${url} is already in ${CONFIG_FILENAME} — skipping.`)
-            return
+        const toAdd: string[] = []
+        const names: string[] = []
+        let skipped = 0
+        for (const { url, key, name } of normalized) {
+            if (seen.has(key)) {
+                terminal.warn(
+                    `${url} is already in ${CONFIG_FILENAME} — skipping.`
+                )
+                skipped += 1
+                continue
+            }
+            seen.add(key)
+            toAdd.push(url)
+            names.push(name)
         }
-        await Config.edit((draft) => {
-            draft.repositories.push(url)
-        })
-        terminal.log(`Added ${url} to ${CONFIG_FILENAME}`)
+        if (toAdd.length > 0) {
+            await Config.edit((draft) => {
+                for (const url of toAdd) {
+                    draft.repositories.push(url)
+                }
+            })
+        }
+        const summary = `Added ${toAdd.length} to ${CONFIG_FILENAME}: ${names.join(", ")}`
+        terminal.log(skipped > 0 ? `${summary} (${skipped} skipped)` : summary)
     }
 })

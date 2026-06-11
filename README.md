@@ -86,7 +86,7 @@ uberepo prune --force
 | Command | Arguments / flags | What it does |
 | --- | --- | --- |
 | `init` | `[name]` `[--no-agents]` | Create the workspace manifest. With a name, creates `<name>/uberepo.json`; without, uses the current directory. Also seeds a `.gitignore` so the workspace is commit-ready and shareable, plus `AGENTS.md` + `CLAUDE.md` and a `using-uberepo` agent skill — stamped for Claude Code (`.claude/skills/`) and cross-tool agents (`.agents/skills/`, read by Codex & Gemini) — to brief AI agents on the workspace (`--no-agents` skips all of that AI context; never overwrites an existing file). |
-| `add` | `<repository>` | Register a repo URL. Validates and normalizes the URL; detects duplicates by identity, so SSH and HTTPS forms of the same repo never double-add. |
+| `add` | `<repository>...` | Register one or more repo URLs in a single call. Validates and normalizes every URL; detects duplicates by identity — both within the batch and against the manifest — so SSH and HTTPS forms of the same repo never double-add. |
 | `remove` | `<repository>` | Unregister a repo, matched by that same identity — any URL form works. |
 | `sources` | — | List registered repositories and whether each is cloned into `source/`. |
 | `clone` | — | Clone every registered repo into `source/<name>`. Skips already-cloned repos; fails fast on a missing credential instead of hanging on an auth prompt. |

@@ -44,7 +44,7 @@ describe("add command", () => {
     })
 
     it("appends the repository to an empty config", async () => {
-        await add.run({ repository: "git@github.com:acme/api.git" })
+        await add.run({ repositories: ["git@github.com:acme/api.git"] })
         expect(await readConfig(configPath)).toEqual({
             repositories: ["git@github.com:acme/api.git"]
         })
@@ -55,7 +55,7 @@ describe("add command", () => {
             configPath,
             `{\n    "repositories": ["https://github.com/acme/a.git"]\n}\n`
         )
-        await add.run({ repository: "https://github.com/acme/b.git" })
+        await add.run({ repositories: ["https://github.com/acme/b.git"] })
         expect(await readConfig(configPath)).toEqual({
             repositories: [
                 "https://github.com/acme/a.git",
@@ -65,21 +65,23 @@ describe("add command", () => {
     })
 
     it("stores a normal https URL", async () => {
-        await add.run({ repository: "https://github.com/acme/api.git" })
+        await add.run({ repositories: ["https://github.com/acme/api.git"] })
         expect(await readConfig(configPath)).toEqual({
             repositories: ["https://github.com/acme/api.git"]
         })
     })
 
     it("stores the user's transport verbatim, only trimming and stripping trailing slashes", async () => {
-        await add.run({ repository: "  ssh://git@example.com/acme/api.git/  " })
+        await add.run({
+            repositories: ["  ssh://git@example.com/acme/api.git/  "]
+        })
         expect(await readConfig(configPath)).toEqual({
             repositories: ["ssh://git@example.com/acme/api.git"]
         })
     })
 
     it("preserves 4-space indentation and a trailing newline", async () => {
-        await add.run({ repository: "https://github.com/acme/api.git" })
+        await add.run({ repositories: ["https://github.com/acme/api.git"] })
         const written = await fsp.readFile(configPath, "utf8")
         expect(written).toBe(
             `{\n    "repositories": [\n        "https://github.com/acme/api.git"\n    ]\n}\n`
@@ -87,9 +89,9 @@ describe("add command", () => {
     })
 
     it("warns and does not duplicate when the same identity is already present", async () => {
-        await add.run({ repository: "https://github.com/acme/api.git" })
+        await add.run({ repositories: ["https://github.com/acme/api.git"] })
         const warnings = await captureWarnings(async () => {
-            await add.run({ repository: "https://github.com/acme/api.git" })
+            await add.run({ repositories: ["https://github.com/acme/api.git"] })
         })
         expect(warnings).toHaveLength(1)
         expect(warnings[0]).toContain("github.com/acme/api")
@@ -99,9 +101,9 @@ describe("add command", () => {
     })
 
     it("dedupes SSH (scp-like) and HTTPS forms of the same repo to one entry", async () => {
-        await add.run({ repository: "git@github.com:foo/bar.git" })
+        await add.run({ repositories: ["git@github.com:foo/bar.git"] })
         const warnings = await captureWarnings(async () => {
-            await add.run({ repository: "https://github.com/foo/bar.git" })
+            await add.run({ repositories: ["https://github.com/foo/bar.git"] })
         })
         expect(warnings).toHaveLength(1)
         expect(await readConfig(configPath)).toEqual({
@@ -110,9 +112,9 @@ describe("add command", () => {
     })
 
     it("dedupes trailing-slash and .git variants of the same repo", async () => {
-        await add.run({ repository: "https://github.com/foo/bar" })
+        await add.run({ repositories: ["https://github.com/foo/bar"] })
         const warnings = await captureWarnings(async () => {
-            await add.run({ repository: "https://github.com/foo/bar.git/" })
+            await add.run({ repositories: ["https://github.com/foo/bar.git/"] })
         })
         expect(warnings).toHaveLength(1)
         expect(await readConfig(configPath)).toEqual({
@@ -123,7 +125,7 @@ describe("add command", () => {
     it("rejects input that is not a URL", async () => {
         let error: unknown
         try {
-            await add.run({ repository: "not a url" })
+            await add.run({ repositories: ["not a url"] })
         } catch (e) {
             error = e
         }
@@ -135,7 +137,7 @@ describe("add command", () => {
     it("rejects an unsupported scheme", async () => {
         let error: unknown
         try {
-            await add.run({ repository: "ftp://x/y" })
+            await add.run({ repositories: ["ftp://x/y"] })
         } catch (e) {
             error = e
         }
@@ -144,11 +146,85 @@ describe("add command", () => {
         expect(await readConfig(configPath)).toEqual({ repositories: [] })
     })
 
+    it("adds multiple new URLs in one call, preserving order", async () => {
+        await add.run({
+            repositories: [
+                "git@github.com:acme/api.git",
+                "https://github.com/acme/web"
+            ]
+        })
+        expect(await readConfig(configPath)).toEqual({
+            repositories: [
+                "git@github.com:acme/api.git",
+                "https://github.com/acme/web"
+            ]
+        })
+        // Same 4-space-indent formatting as the single-arg path.
+        const written = await fsp.readFile(configPath, "utf8")
+        expect(written).toBe(
+            `{\n    "repositories": [\n        "git@github.com:acme/api.git",\n        "https://github.com/acme/web"\n    ]\n}\n`
+        )
+    })
+
+    it("dedupes two URL forms of the same repo within one batch", async () => {
+        const warnings = await captureWarnings(async () => {
+            await add.run({
+                repositories: [
+                    "git@github.com:acme/api.git",
+                    "https://github.com/acme/api"
+                ]
+            })
+        })
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain("github.com/acme/api")
+        expect(await readConfig(configPath)).toEqual({
+            repositories: ["git@github.com:acme/api.git"]
+        })
+    })
+
+    it("skips a URL already in the manifest while adding the new ones in the batch", async () => {
+        await add.run({ repositories: ["https://github.com/acme/api.git"] })
+        const warnings = await captureWarnings(async () => {
+            await add.run({
+                repositories: [
+                    "git@github.com:acme/api.git",
+                    "https://github.com/acme/web.git"
+                ]
+            })
+        })
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toContain("git@github.com:acme/api.git")
+        expect(await readConfig(configPath)).toEqual({
+            repositories: [
+                "https://github.com/acme/api.git",
+                "https://github.com/acme/web.git"
+            ]
+        })
+    })
+
+    it("rejects the whole batch and writes nothing when any URL is malformed", async () => {
+        let error: unknown
+        try {
+            await add.run({
+                repositories: [
+                    "https://github.com/acme/api.git",
+                    "not a url",
+                    "https://github.com/acme/web.git"
+                ]
+            })
+        } catch (e) {
+            error = e
+        }
+        expect(error).toBeInstanceOf(Error)
+        // Nothing should have been written — validation happens before any edit.
+        expect(await readConfig(configPath)).toEqual({ repositories: [] })
+    })
+
     it("walks up parent directories to find the config", async () => {
         const nested = path.join(tmp, "packages", "deep")
         await fsp.mkdir(nested, { recursive: true })
         process.chdir(nested)
-        await add.run({ repository: "https://github.com/acme/nested.git" })
+        await add.run({ repositories: ["https://github.com/acme/nested.git"] })
         expect(await readConfig(configPath)).toEqual({
             repositories: ["https://github.com/acme/nested.git"]
         })
@@ -160,7 +236,9 @@ describe("add command", () => {
         try {
             let error: unknown
             try {
-                await add.run({ repository: "https://github.com/acme/api.git" })
+                await add.run({
+                    repositories: ["https://github.com/acme/api.git"]
+                })
             } catch (e) {
                 error = e
             }
