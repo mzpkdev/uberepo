@@ -3,6 +3,7 @@ import * as path from "node:path"
 import { defineArgument, defineCommand, terminal } from "cmdore"
 import { CONFIG_FILENAME, Config } from "@/config"
 import { noAgents } from "@/options/no-agents"
+import { UBERTASK_FILENAME } from "@/tasks"
 
 const name = defineArgument({
     name: "name",
@@ -27,6 +28,13 @@ const TEMPLATE_DIR = path.join(__dirname, "..", "..", "template")
 // workspace hygiene needed to share a committed workspace regardless of AI
 // tooling) always stamps.
 const AGENT_PATHS = ["AGENTS.md", "CLAUDE.md", ".claude", ".agents"]
+
+// Template files that are per-task SEEDS consumed by a command at runtime, not
+// workspace files init stamps. ubertask.yml is the durable task note: `open`
+// byte-copies it into each task dir (tasks/<task>/ubertask.yml); it must never
+// land at the workspace root on init. Always skipped here, regardless of
+// --no-agents (these top-level names are their own first path-segment).
+const COMMAND_SEEDS = [UBERTASK_FILENAME]
 
 // Recursively collect every FILE under `root`, as paths relative to `root`
 // (posix-joined so the skip checks below see stable, /-separated keys).
@@ -83,7 +91,9 @@ const stampTemplate = async (
 // whole `.claude/` and `.agents/` skill trees (the Claude Code skill and its
 // cross-tool copy read by Codex/Gemini).
 const finish = async (dir: string, agents: boolean): Promise<void> => {
-    const skip = agents ? [] : AGENT_PATHS
+    // Always hold back the per-task command seeds (ubertask.yml); --no-agents
+    // additionally holds back the agent files.
+    const skip = agents ? COMMAND_SEEDS : [...COMMAND_SEEDS, ...AGENT_PATHS]
     const written = [CONFIG_FILENAME, ...(await stampTemplate(dir, skip))]
     terminal.log(`Initialized uberepo in ${dir} — wrote ${written.join(", ")}`)
 }

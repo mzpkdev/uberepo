@@ -1,0 +1,9 @@
+# ubertask.yml — durable task note. The "why"; git holds the "what".
+goal: |
+  <one line: what done looks like & why>
+
+tickets: []
+
+decisions: []
+
+blockers: []

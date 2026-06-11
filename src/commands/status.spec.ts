@@ -7,7 +7,7 @@ import { terminal } from "cmdore"
 import { vi } from "vitest"
 import status from "@/commands/status"
 import { CONFIG_FILENAME } from "@/config"
-import type { Task } from "@/tasks"
+import { type Task, UBERTASK_FILENAME } from "@/tasks"
 
 const exec = promisify(execFile)
 
@@ -104,6 +104,23 @@ describe("status command", () => {
         return wt
     }
 
+    // Write a ubertask.yml at the task level (sibling of the worktree dirs),
+    // optionally backdating its mtime so freshness assertions are deterministic.
+    const writeNote = async (
+        task: string,
+        contents = "goal: |\n  do the thing\n",
+        mtime?: Date
+    ): Promise<string> => {
+        const dir = path.join(root, "tasks", task)
+        await fsp.mkdir(dir, { recursive: true })
+        const file = path.join(dir, UBERTASK_FILENAME)
+        await fsp.writeFile(file, contents)
+        if (mtime) {
+            await fsp.utimes(file, mtime, mtime)
+        }
+        return file
+    }
+
     it("groups worktrees by task and renders branch + clean/dirty per repo", async () => {
         await makeSource("api")
         await makeSource("web")
@@ -159,6 +176,36 @@ describe("status command", () => {
         expect(line).toBeDefined()
         expect(line).toContain("dirty")
         expect(line).not.toContain("clean")
+    })
+
+    it("surfaces ubertask.yml with a freshness age on the task heading", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+        // Backdate the note ~2h so the relative age is deterministic.
+        await writeNote("alpha", undefined, new Date(Date.now() - 2 * 3600_000))
+
+        const logs = await captureLogs(async () => {
+            await status.run({ task: undefined })
+        })
+
+        // The marker rides the task heading line (logs[0]), not a repo line.
+        expect(logs[0]).toContain("alpha")
+        expect(logs[0]).toContain(`${UBERTASK_FILENAME} · updated 2h ago`)
+    })
+
+    it("omits the note marker when the task has no ubertask.yml", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+
+        const logs = await captureLogs(async () => {
+            await status.run({ task: undefined })
+        })
+
+        // Bare task heading — no note file, so no marker anywhere in the output.
+        expect(logs[0]).toBe("alpha")
+        expect(logs.join("\n")).not.toContain(UBERTASK_FILENAME)
     })
 
     it("prints a friendly message when there are no open tasks", async () => {
@@ -314,6 +361,47 @@ describe("status command", () => {
                 repos: [{ name: "api", branch: "task/alpha", dirty: true }]
             }
         ])
+    })
+
+    it("includes the note's presence + mtime in the JSON payload", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+        const mtime = new Date(Date.now() - 2 * 3600_000)
+        await writeNote("alpha", undefined, mtime)
+
+        const written = await captureJson(async () => {
+            await status.run({ task: undefined })
+        })
+
+        const parsed = JSON.parse(written.join("")) as Task[]
+        expect(parsed).toEqual([
+            {
+                name: "alpha",
+                repos: [{ name: "api", branch: "task/alpha", dirty: false }],
+                note: { mtime: mtime.getTime() }
+            }
+        ])
+    })
+
+    it("omits the note key from the JSON payload when absent", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+
+        const written = await captureJson(async () => {
+            await status.run({ task: undefined })
+        })
+
+        const parsed = JSON.parse(written.join("")) as Task[]
+        // No note file → the `note` key is absent entirely (not null/empty).
+        expect(parsed).toEqual([
+            {
+                name: "alpha",
+                repos: [{ name: "api", branch: "task/alpha", dirty: false }]
+            }
+        ])
+        expect(parsed[0]).not.toHaveProperty("note")
     })
 
     it("emits an empty array under --json when there are no open tasks", async () => {

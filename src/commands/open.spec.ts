@@ -7,8 +7,16 @@ import { promisify } from "node:util"
 import { terminal } from "cmdore"
 import open from "@/commands/open"
 import { CONFIG_FILENAME } from "@/config"
+import { UBERTASK_FILENAME } from "@/tasks"
 
 const exec = promisify(execFile)
+
+// The seed open stamps lives in the repo's template/ dir and is the single
+// source of truth — read it off disk (resolved relative to this spec, the way
+// open resolves it relative to itself) and assert the stamped note is
+// byte-identical, so an empty/garbled resolution surfaces as a mismatch.
+const TEMPLATE_DIR = path.join(__dirname, "..", "..", "template")
+const UBERTASK_TEMPLATE = path.join(TEMPLATE_DIR, UBERTASK_FILENAME)
 
 // Run a git command directly (NOT the wrapper under test) so test setup and
 // assertions stay independent of git.ts.
@@ -182,6 +190,76 @@ describe("open command", () => {
         )
         expect(await branchAt("web", "alpha")).toBe("task/alpha")
         expect(second.join("\n")).toContain("Opened task alpha in 1 repository")
+    })
+
+    it("seeds tasks/<task>/ubertask.yml from the template, at the task level", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+
+        const logs = await captureLogs(async () => {
+            await open.run({ task: "alpha", from: undefined })
+        })
+
+        // The note lands at the TASK dir — a sibling of the per-repo worktree
+        // dirs, NOT inside any worktree and NOT one-per-repo.
+        const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+        expect(fs.existsSync(note)).toBe(true)
+        expect(
+            fs.existsSync(
+                path.join(root, "tasks", "alpha", "api", UBERTASK_FILENAME)
+            )
+        ).toBe(false)
+        // Byte-for-byte against the on-disk template — proves the stamp copies
+        // the real seed (not an empty/garbled resolution).
+        expect(await fsp.readFile(note, "utf8")).toBe(
+            await fsp.readFile(UBERTASK_TEMPLATE, "utf8")
+        )
+        expect(logs.join("\n")).toContain(
+            `Seeded ${path.join("tasks", "alpha", UBERTASK_FILENAME)}`
+        )
+    })
+
+    it("does NOT overwrite an existing ubertask.yml on re-run", async () => {
+        await makeSource("api")
+        await register(["api"])
+
+        await captureLogs(async () => {
+            await open.run({ task: "alpha", from: undefined })
+        })
+
+        // Mutate the note to a sentinel, then re-run open (the recovery path).
+        const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+        const edited = "goal: |\n  edited by hand — keep me\n"
+        await fsp.writeFile(note, edited)
+
+        const second = await captureLogs(async () => {
+            await open.run({ task: "alpha", from: undefined })
+        })
+
+        // The hand-edited note is preserved verbatim — never clobbered.
+        expect(await fsp.readFile(note, "utf8")).toBe(edited)
+        expect(second.join("\n")).toContain(
+            `Skipping ${path.join("tasks", "alpha", UBERTASK_FILENAME)} — already exists`
+        )
+    })
+
+    it("stamps the template seed bytes, which match the on-disk template", async () => {
+        // Guards the seed asset itself: template/ubertask.yml is the committed
+        // source open copies, and it carries the locked seed (comment ABOVE the
+        // key, empty-array fields, a `|` block scalar for goal).
+        const seed = await fsp.readFile(UBERTASK_TEMPLATE, "utf8")
+        expect(seed).toBe(
+            '# ubertask.yml — durable task note. The "why"; git holds the "what".\n' +
+                "goal: |\n" +
+                "  <one line: what done looks like & why>\n" +
+                "\n" +
+                "tickets: []\n" +
+                "\n" +
+                "decisions: []\n" +
+                "\n" +
+                "blockers: []\n"
+        )
     })
 
     it("warns and skips an uncloned repo while opening the cloned ones", async () => {

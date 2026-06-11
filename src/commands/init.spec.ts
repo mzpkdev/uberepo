@@ -3,6 +3,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import init from "@/commands/init"
 import { CONFIG_FILENAME } from "@/config"
+import { UBERTASK_FILENAME } from "@/tasks"
 
 const AGENTS_FILENAME = "AGENTS.md"
 const CLAUDE_FILENAME = "CLAUDE.md"
@@ -152,6 +153,22 @@ describe("init command", () => {
         expect(
             await fsp.readFile(path.join(tmp, AGENT_SKILL_REF_REL), "utf8")
         ).toBe(agentSkillRefTemplate)
+    })
+
+    it("does NOT stamp ubertask.yml — it's a per-task seed open copies, not a workspace file", async () => {
+        // ubertask.yml lives in template/ as the durable-note seed, but `open`
+        // (not init) byte-copies it into each task dir. It must never land at
+        // the workspace root, even though the recursive stamp surfaces it.
+        await init.run({ name: undefined, "no-agents": false })
+
+        await expect(
+            fsp.access(path.join(tmp, UBERTASK_FILENAME))
+        ).rejects.toThrow()
+        // The agent files still land — proving the skip is scoped to the seed,
+        // not a blanket stamp failure.
+        expect(
+            await fsp.readFile(path.join(tmp, AGENTS_FILENAME), "utf8")
+        ).toBe(agentsTemplate)
     })
 
     it("stamps AGENTS.md, CLAUDE.md, and .gitignore into <name>/ with uberepo.json", async () => {

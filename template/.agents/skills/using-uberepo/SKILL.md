@@ -47,6 +47,22 @@ across them at once and switch tasks by switching directories — not `git check
 3. **For flags, sharing, and refusal-recovery**, read [reference.md](reference.md).
    `uberepo --help` lists every command and flag.
 
+## The task note — `tasks/<task>/ubertask.yml`
+
+A per-task handoff note carrying the durable context git can't: the `goal`,
+`tickets`, deliberate `decisions`, and known `blockers`. `open` seeds it; it dies
+with the task on `close`. It holds the *why*, not the *what* — git already shows
+what changed, what's done, what's left.
+
+- **Resuming a task:** read it first for the standing context, then reconcile
+  against `git status`/`git diff`. It's a hint, not truth — if they disagree,
+  reality wins, so fix the note.
+- **While you work:** set `goal` when you open the task; append a `decision` or
+  `blocker` the moment one lands, tagging `repo:` when it's about a single repo.
+  Don't record progress, next-steps, or dates — git and the file's mtime cover those.
+
+Schema, field rules, and an example: [reference.md](reference.md).
+
 ## Golden rules
 
 - Work in `tasks/<task>/<name>/`, **never** in `source/` — `source/` is the
@@ -54,6 +70,8 @@ across them at once and switch tasks by switching directories — not `git check
 - Don't hand-edit `uberepo.json` (use `add`/`remove`), don't `rm` task dirs or run
   raw `git worktree` (use `open`/`close` — they guard unsaved work), and don't
   `--force` past a `sync`/`close`/`prune` refusal unless the work is genuinely saved.
+- Keep `tasks/<task>/ubertask.yml` honest — it's the next session's handoff. A
+  stale note that contradicts git is worse than no note.
 
 ## What to return
 

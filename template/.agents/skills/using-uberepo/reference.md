@@ -67,6 +67,46 @@ Removes the worktrees and deletes the `task/<task>` branch in every repo.
 - `--force` — skip the refusal. Only when you are certain the work is saved or
   pushed; this can drop commits.
 
+## The task note — `ubertask.yml`
+
+`open` seeds `tasks/<task>/ubertask.yml`: a per-task handoff note carrying the
+durable context git can't regenerate — the goal, related links, deliberate
+decisions, and known blockers. git holds the live state (what changed, what's
+done, what's left); the note holds the *why*. It's gitignored and dies with the
+task on `close`.
+
+### Schema
+
+    # ubertask.yml — durable task note. The "why"; git holds the "what".
+    goal: |
+      Kill the SSO redirect loop — users bounce /login ↔ /callback
+    tickets:
+      - https://acme.atlassian.net/browse/PROJ-1234
+    decisions:
+      - note: |
+          keep /v1 alive — mobile still rides it
+        repo: api
+    blockers:
+      - note: |
+          dev server needs api on :8080 first or /callback 502s
+        repo: web
+
+- `goal` — one-line `|` block: what done looks like and why. Always set it.
+- `tickets` — list of URLs (issue, PR, doc, thread).
+- `decisions` / `blockers` — lists of `{ note: |, repo? }`. `note` is a `|` literal
+  block (free text — colons, `#`, slashes need no quoting). `repo:` is optional —
+  a `source/<name>` when the item is about one repo; omit it for cross-cutting items.
+
+### Keep it honest
+
+- **Resuming:** read the note for standing context, then reconcile against
+  `git status`/`git diff`. It's a hint, not truth — reality wins; fix the note
+  when they disagree.
+- **Working:** set `goal` on `open`; append a `decision`/`blocker` the moment it
+  lands, tagging `repo:` when it's repo-specific.
+- **Don't store what git knows** — no progress, next-steps, changed files, or
+  dates. `uberepo status` surfaces the note's freshness from its mtime.
+
 ## Set up / share a workspace
 
 | Command | Effect |
