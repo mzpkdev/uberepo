@@ -1,142 +1,190 @@
 <p align="center">
-  <img src=".github/assets/banner.svg" alt="uberepo — switch tasks, not branches" width="100%">
+  <img src=".github/assets/banner.svg" alt="überepo — switch tasks, not branches" width="100%">
 </p>
 
 <p align="center">
-  One workspace for all your repos. Built for local dev.
-</p>
-
-<p align="center">
-  Every repo clones into one place; every <em>task</em> gets its own set of git worktrees — so you work across repos at once and switch tasks without <code>git checkout</code> thrash.
+  A multi-repo workspace where one task owns one branch in <i>every</i> repo —<br>
+  and every command speaks JSON, so your coding agent can drive it too.
 </p>
 
 ---
 
-## The idea
+## The problem with five repos
 
-Real work rarely fits in one repo. A single change touches the API, the web app, maybe a shared library — and the moment you want to jump to a second task, `git checkout` forces you to stash, rebuild, and lose your place in every repo at once.
-
-uberepo gives each task its own worktree in every repo. Open a task and you get a clean branch (`task/<name>`) checked out across the whole workspace, side by side with whatever else you have open. Switch tasks by switching directories, not branches. Nothing gets stashed; nothing gets clobbered.
+You've got one feature. It spans the API, the web app, the shared types package, and two services. Five repos. So you start the dance:
 
 ```text
-tasks/login-bug/   →  api, web, ... all on  task/login-bug
-tasks/new-billing/ →  api, web, ... all on  task/new-billing
+cd api      && git checkout -b express-checkout
+cd ../web   && git checkout -b express-checkout
+cd ../types && git checkout -b express-checkout
+cd ../svc-a && git checkout -b express-checkout
+cd ../svc-b && git checkout -b express-checkout
 ```
 
-Both open at the same time. No checkout in sight.
+Then a "quick fix" lands on `main` and you do the whole thing again in reverse, stashing as you go. Which repo am I on? Did I push `types`? One stray `git checkout` and you're committing to `main` like an animal.
 
-## Install
+Here's the mismatch: **a branch is a per-repo idea. Your task isn't.** Your task is "ship express checkout" — it doesn't care that it happens to touch five repositories.
 
-uberepo isn't published to npm — clone it and run it from source (it executes directly via `tsx`, so there's no build step).
+## So überepo flips it
+
+One task = one branch in **every** repo, each in its own git worktree:
 
 ```bash
-# Clone with the cmdore submodule (vendored in lib/)
-git clone --recurse-submodules https://github.com/mzpkdev/uberepo
-cd uberepo
-
-# Install dependencies
-npm install
-
-# Run it (any of these work)
-npm run dev -- <command>     # e.g. npm run dev -- init
-node bin/uberepo.mjs <command>
-
-# Or put `uberepo` on your PATH for the lifecycle below
-npm link
+uberepo open express-checkout
 ```
 
-Already cloned without `--recurse-submodules`? Populate `lib/` first with `git submodule update --init`, then `npm install`.
+That's the five checkouts. One command. Every repo gets a `task/express-checkout` branch living in its own directory under `tasks/express-checkout/`. You switch tasks by changing folders — not by checkout-dancing across repos. Your `main` checkout never moves, because worktrees don't stomp on each other.
+
+Tasks are first-class. Repos are just the participants.
 
 ## Quickstart
 
-A full task lifecycle, start to finish:
+```bash
+npm install -g uberepo
+```
 
 ```bash
-# 1. Create the workspace manifest (uberepo.json) in the current directory
-uberepo init
+# 1. carve out a workspace
+uberepo init my-workspace && cd my-workspace
 
-# 2. Register a couple of repositories (SSH or HTTPS — your choice)
-uberepo add git@github.com:acme/api.git
-uberepo add https://github.com/acme/web
+# 2. tell it which repos play (variadic — list as many as you want)
+uberepo add https://github.com/acme/api.git https://github.com/acme/web.git
 
-# 3. Clone everything registered into source/
+# 3. clone them all into source/
 uberepo clone
 
-# 4. Open a task — a worktree on branch task/login-bug in every repo
-uberepo open login-bug
+# 4. open a task — branch + worktree in every repo, in one shot
+uberepo open express-checkout --goal "Add express checkout flow"
 
-#    ...edit, commit, and push inside tasks/login-bug/api, tasks/login-bug/web...
+# 5. do the work. überepo does NOT commit or push for you — edit and
+#    commit inside each worktree, following that repo's own conventions:
+#       tasks/express-checkout/api/
+#       tasks/express-checkout/web/
 
-# 5. See what's open and which worktrees are dirty
-uberepo status
+# 6. rebase the whole task onto fresh upstreams
+uberepo sync express-checkout
 
-# 6. Pull the latest main into the task and rebase your work onto it
-uberepo sync login-bug
+# 7. push every branch + open a draft PR per repo (needs the gh CLI)
+uberepo ship express-checkout --title "Express checkout"
 
-# 7. Done? Remove the task's worktrees and delete its branch
-uberepo close login-bug
-
-# 8. Periodically sweep merged-and-clean tasks (preview, then apply)
-uberepo prune
-uberepo prune --force
+# 8. once the PRs merge, tear it all down
+uberepo close express-checkout
 ```
+
+## Built so your agent can drive it
+
+überepo doesn't just tolerate coding agents — it's built for them.
+
+**Every command speaks JSON.** Add `--json` to anything and get structured output instead of pretty text. No scraping terminal strings, no regex against human prose.
+
+```bash
+uberepo status --json
+```
+
+```json
+[
+  {
+    "name": "express-checkout",
+    "repos": [
+      { "name": "api", "branch": "task/express-checkout", "dirty": false },
+      { "name": "web", "branch": "task/express-checkout", "dirty": true }
+    ],
+    "note": {
+      "goal": "Add express checkout flow",
+      "repos": ["api", "web"],
+      "tickets": [],
+      "decisions": [],
+      "blockers": [],
+      "mtime": 1749600000000
+    }
+  }
+]
+```
+
+**Tasks carry handoff notes.** Every task gets a `tasks/<task>/ubertask.yml` — the durable context git can't show you: the goal, which repos are in scope, ticket links, decisions made, what's blocked. One agent session writes it; the next one — or you, on Monday morning — reads it and knows exactly where things stand.
+
+```yaml
+# ubertask.yml — durable task note. The "why"; git holds the "what".
+goal: |
+  Add express checkout flow
+
+repos:
+  - api
+  - web
+
+tickets:
+  - https://example.com/ACME-1234
+
+decisions:
+  - note: |
+      Reusing the existing Stripe client in api, not adding a new dep.
+    repo: api
+
+blockers: []
+```
+
+**Runs are idempotent and resumable.** `open`, `clone`, and `ship` skip what's already done and pick up where they left off. An agent can re-run a command after a crash and not make a mess.
+
+**It ships its own playbook.** `uberepo init` stamps a `using-uberepo` skill into the workspace so Claude Code and other agents know the entire lifecycle without you explaining it. (Pass `--no-agents` to skip that.)
+
+## What a workspace looks like
+
+```text
+my-workspace/
+├── uberepo.json                    # the manifest: which repos, which hooks
+├── source/                         # one canonical clone per repo
+│   ├── api/
+│   └── web/
+└── tasks/
+    └── express-checkout/           # one task...
+        ├── ubertask.yml            # ...its handoff note
+        ├── api/                    # ...and a worktree per repo, on task/express-checkout
+        └── web/
+```
+
+State lives in git (branches + worktrees), in `uberepo.json` (the manifest), and in `ubertask.yml` (the task note). There's no database to corrupt.
 
 ## Commands
 
-| Command | Arguments / flags | What it does |
-| --- | --- | --- |
-| `init` | `[name]` `[--no-agents]` | Create the workspace manifest. With a name, creates `<name>/uberepo.json`; without, uses the current directory. Also seeds a `.gitignore` so the workspace is commit-ready and shareable, plus `AGENTS.md` + `CLAUDE.md` and a `using-uberepo` agent skill — stamped for Claude Code (`.claude/skills/`) and cross-tool agents (`.agents/skills/`, read by Codex & Gemini) — to brief AI agents on the workspace (`--no-agents` skips all of that AI context; never overwrites an existing file). |
-| `add` | `<repository>...` | Register one or more repo URLs in a single call. Validates and normalizes every URL; detects duplicates by identity — both within the batch and against the manifest — so SSH and HTTPS forms of the same repo never double-add. |
-| `remove` | `<repository>` | Unregister a repo, matched by that same identity — any URL form works. |
-| `sources` | — | List registered repositories and whether each is cloned into `source/`. |
-| `clone` | — | Clone every registered repo into `source/<name>`. Skips already-cloned repos; fails fast on a missing credential instead of hanging on an auth prompt. |
-| `pull` | — | Fast-forward every cloned source repo to its origin (ff-only; skips dirty/diverged). |
-| `status` | `[task]` | Show open tasks and each worktree's branch and clean/dirty state. Optional task filter. |
-| `open` | `<task>` `[--from <ref>]` | Create the task's worktree (branch `task/<task>`) in every cloned repo, branched off each clone's current `HEAD` or `--from <ref>`. Idempotent. |
-| `close` | `<task>` `[--force]` | Remove the task's worktrees and delete its branch. Skips any repo with uncommitted or unmerged work unless `--force`; closes the safe ones and reports the rest. |
-| `sync` | `<task>` `[--from <ref>]` | Fetch and rebase each of the task's worktrees onto the repo's fresh remote default branch, or `--from <ref>`. Stops at the first conflict for you to resolve. |
-| `prune` | `[--force]` | Find tasks whose branches are fully merged and clean. Previews them by default; removes worktrees and branches with `--force`. |
+**Set up the workspace**
 
-`--from` is aliased `-b`; `--force` is aliased `-f`. Any command accepts `--json` for machine-readable output.
+| Command | What it does |
+| --- | --- |
+| `uberepo init [<name>] [--no-agents]` | Create a workspace. `--no-agents` skips the agent skill files. |
+| `uberepo add <repo>...` | Register one or more repository URLs. Variadic. |
+| `uberepo remove <repo>` | Unregister a repository. |
+| `uberepo sources` | List registered repos and their clone status. |
+| `uberepo clone` | Clone every registered repo into `source/`. Idempotent. |
+| `uberepo pull` | Fast-forward all source clones (skips dirty ones). |
 
-## Workspace layout
+**Run a task**
 
-`init` writes a manifest; `clone` and `open` build the tree around it:
+| Command | What it does |
+| --- | --- |
+| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`. |
+| `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
+| `uberepo sync <task>` | Rebase the task's worktrees onto fresh upstreams. |
+| `uberepo ship <task>` | Push every branch and open a draft PR per repo (needs `gh`). |
+| `uberepo close <task>` | Remove the worktrees and delete the task branch. |
+| `uberepo prune` | Remove merged-and-clean tasks. Previews by default; `--force` to commit. |
 
-```text
-<workspace>/
-├── uberepo.json          # the manifest: { "repositories": [...] }
-├── source/
-│   ├── api               # each repo cloned flat as source/<name>
-│   └── web
-└── tasks/
-    └── <task>/           # one worktree set per task
-        ├── api           # on branch  task/<task>
-        └── web
-```
-
-The manifest is plain JSON:
-
-```json
-{
-    "repositories": [
-        "git@github.com:acme/api.git",
-        "https://github.com/acme/web"
-    ]
-}
-```
-
-Commands work from anywhere inside the workspace — uberepo walks up from the current directory to find `uberepo.json`.
+Every command accepts `--json`. Commands that run hooks (`clone`, `open`, `sync`) accept `--no-hooks`.
 
 ## How it works
 
-- **Flat sources.** Each repo clones to `source/<name>`, where `<name>` is the last path segment of its URL. `clone` refuses to start if two different repos would collide on the same folder.
-- **Identity-based dedupe.** `add` and `remove` compare repos by host, owner, and name — not by literal string — so `git@github.com:acme/api.git` and `https://github.com/acme/api` are recognized as the same repo.
-- **Worktree per task.** `open` creates `tasks/<task>/<name>` as a git worktree on branch `task/<task>` in every cloned repo. Reopening is idempotent and doubles as the recovery path after a partial run. `status` reads the truth from git's own worktree registry, not from stray directories.
-- **Safe by default.** `close` and `prune` won't touch a repo with uncommitted or unmerged work unless you pass `--force`. `sync` refuses to run if any of the task's worktrees is dirty, and stops at the first rebase conflict rather than charging ahead.
+No daemon. No database. No lock file. Git is the source of truth, and überepo is a thin, opinionated layer over `git worktree`:
 
-## Built with
+- **Worktrees do the heavy lifting.** Each task branch is a real `git worktree` checkout. überepo lists open tasks by reading git's own worktree registry — delete a worktree directory and the task simply vanishes from `status`. Nothing to desync.
+- **Hooks handle the setup grind.** Wire `post-clone`, `post-open`, and `post-sync` commands into `uberepo.json` and überepo fires them per repo with `UBEREPO_TASK` and `UBEREPO_REPO_*` in the environment — `npm install`, copy a `.env`, whatever each repo needs to come alive.
+- **It never commits for you.** überepo moves branches and worktrees around. The commits and pushes are yours (or your agent's), following each repo's conventions. It's a coordinator, not a backseat driver.
 
-- [cmdore](https://github.com/mzpkdev/cmdore) — a TypeScript CLI framework, vendored in `lib/` as a git submodule.
-- TypeScript on Node, run directly through [`tsx`](https://github.com/privatenumber/tsx) — no build step.
-- Tested with [Vitest](https://vitest.dev) (`npm test`); linted and formatted with [Biome](https://biomejs.dev) (`npm run lint`, `npm run format`); type-checked with `npm run typecheck`.
+The task lifecycle, end to end:
+
+```text
+  ╭──────╮      ╭──────╮      ╭──────╮      ╭───────╮
+  │ open │ ───▶ │ sync │ ───▶ │ ship │ ───▶ │ close │
+  ╰──────╯      ╰───▲──╯      ╰──┬───╯      ╰───────╯
+                    │            │
+                    ╰────────────╯
+                  iterate until merged
+```

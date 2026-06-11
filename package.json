@@ -2,6 +2,7 @@
   "name": "uberepo",
   "version": "1.0.0",
   "description": "One workspace for all your repos — a worktree per task across every repo",
+  "license": "MIT",
   "main": "src/cli.ts",
   "bin": {
     "uberepo": "bin/uberepo.mjs"
