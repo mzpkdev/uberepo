@@ -74,6 +74,79 @@ describe("Config", () => {
             const config = await Config.read({ cwd: tmp })
             expect(config).toEqual({ repositories: [] })
         })
+
+        it("reads a valid hooks map of event -> command string", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: ["a"],
+                    hooks: {
+                        "post-clone": "npm ci",
+                        "post-open": "bash setup.sh",
+                        "post-sync": "python3 relink.py"
+                    }
+                })
+            )
+            const config = await Config.read({ cwd: tmp })
+            expect(config).toEqual({
+                repositories: ["a"],
+                hooks: {
+                    "post-clone": "npm ci",
+                    "post-open": "bash setup.sh",
+                    "post-sync": "python3 relink.py"
+                }
+            })
+        })
+
+        it("keeps an old manifest with no hooks key working unchanged", async () => {
+            await writeConfig(tmp, `{\n    "repositories": ["a", "b"]\n}\n`)
+            const config = await Config.read({ cwd: tmp })
+            // No `hooks` key is added — backward compatible.
+            expect(config).toEqual({ repositories: ["a", "b"] })
+            expect("hooks" in config).toBe(false)
+        })
+
+        it("rejects an unknown hook event with the valid events listed", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: [],
+                    hooks: { "pre-commit": "echo no" }
+                })
+            )
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: "hooks" has an unknown event "pre-commit" — valid events are post-clone, post-open, post-sync`
+            )
+        })
+
+        it("rejects a non-string hook command value", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: [],
+                    hooks: { "post-clone": 123 }
+                })
+            )
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: "hooks.post-clone" must be a command string`
+            )
+        })
+
+        it("rejects hooks that is not an object", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({ repositories: [], hooks: ["post-clone"] })
+            )
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: "hooks" must be an object mapping an event to a command string`
+            )
+        })
     })
 
     describe("edit", () => {

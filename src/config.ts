@@ -3,11 +3,24 @@ import * as path from "node:path"
 
 export type UberepoConfig = {
     repositories: string[]
+    // A PARTIAL map: any subset of the valid events may be bound (declaring just
+    // `post-clone` is valid). Absent entirely = no hooks. The validator rejects
+    // unknown keys, so the runtime shape can only ever be a subset of HookEvent.
+    hooks?: Partial<Record<HookEvent, string>>
 }
 
 export const CONFIG_FILENAME = "uberepo.json"
 
 export const TASKS_DIR = "tasks"
+
+// The lifecycle events a hook command can bind to (v1, exactly these three —
+// kebab-case to match git's own hook naming). Each fires per repo right after
+// that repo's git op succeeds: post-clone after a fresh clone, post-open after a
+// new worktree, post-sync after a clean rebase. The list is the source of truth
+// for both the config validator's typo guard and the runner's lookups.
+export const HOOK_EVENTS = ["post-clone", "post-open", "post-sync"] as const
+
+export type HookEvent = (typeof HOOK_EVENTS)[number]
 
 const DEFAULTS: UberepoConfig = { repositories: [] }
 
@@ -38,6 +51,35 @@ const parse = (raw: string, file: string): UberepoConfig => {
     const config = { ...DEFAULTS, ...(data as Partial<UberepoConfig>) }
     if (!Array.isArray(config.repositories)) {
         throw new Error(`${file}: "repositories" must be an array of strings`)
+    }
+    // `hooks` is optional and backward-compatible: an absent key reads as no
+    // hooks (the key stays off `config` entirely). When present it must be an
+    // object mapping a KNOWN event to a shell-command STRING. An unknown event
+    // key is a typo guard — reject it with the valid set listed — and a
+    // non-string value is rejected too, so a malformed manifest fails loud at
+    // read time rather than at hook-fire time.
+    if (config.hooks !== undefined) {
+        if (
+            typeof config.hooks !== "object" ||
+            config.hooks === null ||
+            Array.isArray(config.hooks)
+        ) {
+            throw new Error(
+                `${file}: "hooks" must be an object mapping an event to a command string`
+            )
+        }
+        for (const [event, command] of Object.entries(config.hooks)) {
+            if (!(HOOK_EVENTS as readonly string[]).includes(event)) {
+                throw new Error(
+                    `${file}: "hooks" has an unknown event "${event}" — valid events are ${HOOK_EVENTS.join(", ")}`
+                )
+            }
+            if (typeof command !== "string") {
+                throw new Error(
+                    `${file}: "hooks.${event}" must be a command string`
+                )
+            }
+        }
     }
     return config
 }

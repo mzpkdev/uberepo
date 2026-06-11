@@ -5,6 +5,16 @@ import { Config } from "@/config"
 import git from "@/git"
 import { normalizeRepository } from "@/url"
 
+// One source repo's pull outcome. `updated` = fast-forwarded to a new HEAD,
+// `current` = already up to date, `skipped` = not pulled (with `reason`: not
+// cloned, dirty, or a non-fast-forward). The reason strings mirror the human
+// lines' wording so the two views agree.
+type PullRepo = {
+    name: string
+    status: "updated" | "current" | "skipped"
+    reason?: string
+}
+
 export default defineCommand({
     name: "pull",
     description: "Fast-forward every cloned source repository to its origin",
@@ -16,6 +26,7 @@ export default defineCommand({
         let current = 0
         let skipped = 0
         let cloned = 0
+        const repos: PullRepo[] = []
 
         for (const url of config.repositories) {
             const { name } = normalizeRepository(url)
@@ -24,6 +35,7 @@ export default defineCommand({
             // A repo participates only when it is cloned (source/<name>);
             // registered-but-not-cloned repos are reported, not pulled.
             if (!fs.existsSync(source)) {
+                repos.push({ name, status: "skipped", reason: "not cloned" })
                 terminal.log(`${name}: not cloned — run clone`)
                 continue
             }
@@ -35,6 +47,11 @@ export default defineCommand({
             // could fail mid-way, and source/<name> is meant to stay a clean
             // read-only base. Skip intact, with a reason.
             if (await repo.dirty()) {
+                repos.push({
+                    name,
+                    status: "skipped",
+                    reason: "uncommitted changes"
+                })
                 terminal.log(`${name}: uncommitted changes — skipped`)
                 skipped += 1
                 continue
@@ -48,6 +65,11 @@ export default defineCommand({
             try {
                 await repo.pull()
             } catch {
+                repos.push({
+                    name,
+                    status: "skipped",
+                    reason: "can't fast-forward"
+                })
                 terminal.log(`${name}: can't fast-forward — skipped`)
                 skipped += 1
                 continue
@@ -55,13 +77,20 @@ export default defineCommand({
             const after = await repo.raw("rev-parse", "--short", "HEAD")
 
             if (before === after) {
+                repos.push({ name, status: "current" })
                 terminal.log(`${name}: up to date`)
                 current += 1
             } else {
+                repos.push({ name, status: "updated" })
                 terminal.log(`${name}: pulled ${before} → ${after}`)
                 pulled += 1
             }
         }
+
+        // JSON carries the full per-repo outcome (including not-cloned skips)
+        // in both the no-cloned and normal cases, so the agent view never loses
+        // a repo the human summary collapses into a count.
+        terminal.json({ repos })
 
         if (cloned === 0) {
             terminal.log("Nothing to pull — no cloned repositories.")

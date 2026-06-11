@@ -4,10 +4,35 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { promisify } from "node:util"
 import { terminal } from "cmdore"
+import { vi } from "vitest"
 import pull from "@/commands/pull"
 import { CONFIG_FILENAME } from "@/config"
 
 const exec = promisify(execFile)
+
+// Run `fn` with jsonMode enabled, returning the single parsed JSON object the
+// command wrote to stdout. Resets jsonMode in finally before any assertion can
+// throw, so a failing expect() never leaks jsonMode into sibling suites.
+const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
+    const written: string[] = []
+    const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: string | Uint8Array): boolean => {
+            written.push(chunk.toString())
+            return true
+        })
+    terminal.jsonMode = true
+    try {
+        await fn()
+    } finally {
+        terminal.jsonMode = false
+        spy.mockRestore()
+    }
+    const output = written.join("")
+    expect(written).toEqual([output])
+    expect(output.endsWith("\n")).toBe(true)
+    return JSON.parse(output) as T
+}
 
 // Run a git command directly (NOT the wrapper under test) so test setup and
 // assertions stay independent of git.ts.
@@ -68,6 +93,8 @@ describe("pull command", () => {
     })
 
     afterEach(async () => {
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -289,5 +316,56 @@ describe("pull command", () => {
             process.chdir(root)
             await fsp.rm(orphan, { recursive: true, force: true })
         }
+    })
+
+    type PullJson = {
+        repos: { name: string; status: string; reason?: string }[]
+    }
+
+    it("emits updated/current per repo under --json", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        // api's upstream advances (→ updated); web's does not (→ current).
+        await advanceUpstream("api", "upstream.txt", "api\n")
+
+        const json = await captureJson<PullJson>(async () => {
+            await pull.run({})
+        })
+        expect(json).toEqual({
+            repos: [
+                { name: "api", status: "updated" },
+                { name: "web", status: "current" }
+            ]
+        })
+    })
+
+    it("emits skipped with the matching reason for dirty and not-cloned repos under --json", async () => {
+        const dir = await makeSource("api")
+        // web is registered but never cloned (no source/web).
+        await register(["api", "web"])
+        // Make api dirty so it is skipped for uncommitted changes.
+        await fsp.writeFile(path.join(dir, "README.md"), "uncommitted\n")
+
+        const json = await captureJson<PullJson>(async () => {
+            await pull.run({})
+        })
+        expect(json).toEqual({
+            repos: [
+                {
+                    name: "api",
+                    status: "skipped",
+                    reason: "uncommitted changes"
+                },
+                { name: "web", status: "skipped", reason: "not cloned" }
+            ]
+        })
+    })
+
+    it("emits { repos:[] } under --json when nothing is registered", async () => {
+        const json = await captureJson<PullJson>(async () => {
+            await pull.run({})
+        })
+        expect(json).toEqual({ repos: [] })
     })
 })

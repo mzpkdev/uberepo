@@ -5,10 +5,35 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { promisify } from "node:util"
 import { terminal } from "cmdore"
+import { vi } from "vitest"
 import prune from "@/commands/prune"
 import { CONFIG_FILENAME } from "@/config"
 
 const exec = promisify(execFile)
+
+// Run `fn` with jsonMode enabled, returning the single parsed JSON object the
+// command wrote to stdout. Resets jsonMode in finally before any assertion can
+// throw, so a failing expect() never leaks jsonMode into sibling suites.
+const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
+    const written: string[] = []
+    const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: string | Uint8Array): boolean => {
+            written.push(chunk.toString())
+            return true
+        })
+    terminal.jsonMode = true
+    try {
+        await fn()
+    } finally {
+        terminal.jsonMode = false
+        spy.mockRestore()
+    }
+    const output = written.join("")
+    expect(written).toEqual([output])
+    expect(output.endsWith("\n")).toBe(true)
+    return JSON.parse(output) as T
+}
 
 // Run a git command directly (NOT the wrapper under test) so test setup and
 // assertions stay independent of git.ts.
@@ -69,6 +94,8 @@ describe("prune command", () => {
     })
 
     afterEach(async () => {
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -174,6 +201,18 @@ describe("prune command", () => {
     const taskDir = (task: string, name: string): string =>
         path.join(root, "tasks", task, name)
 
+    // Write a ubertask.yml at the task level declaring a scope (the repos: the
+    // task owns), so prune can be exercised against a scoped task.
+    const writeScope = async (task: string, repos: string[]): Promise<void> => {
+        const dir = path.join(root, "tasks", task)
+        await fsp.mkdir(dir, { recursive: true })
+        const list = repos.map((r) => `  - ${r}`).join("\n")
+        await fsp.writeFile(
+            path.join(dir, "ubertask.yml"),
+            `goal: |\n  g\n\nrepos:\n${list}\n`
+        )
+    }
+
     it("preview lists a merged task, omits an unmerged task, and removes nothing", async () => {
         await makeSource("api")
         await register(["api"])
@@ -219,6 +258,58 @@ describe("prune command", () => {
             expect(fs.existsSync(taskDir("alpha", name))).toBe(true)
             expect(await branchExists(name, "alpha")).toBe(true)
         }
+    })
+
+    it("respects a declared scope: prunes only in-scope repos, warns about a stray, and leaves it standing", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        await openWorktree("api", "alpha")
+        await openWorktree("web", "alpha")
+        // Both merged, but the task owns api only; web's worktree is drift.
+        await landTask("api", "alpha")
+        await landTask("web", "alpha")
+        await writeScope("alpha", ["api"])
+
+        // Preview names only the in-scope repo and warns about the stray.
+        const preview = await captureOutput(async () => {
+            await prune.run({ force: false })
+        })
+        expect(preview.logs.join("\n")).toContain("would prune alpha (api)")
+        expect(preview.warnings.join("\n")).toContain(
+            "alpha/web: worktree outside task scope"
+        )
+
+        // --force prunes api (in scope) and leaves web (the stray) untouched.
+        const applied = await captureOutput(async () => {
+            await prune.run({ force: true })
+        })
+        expect(applied.logs.join("\n")).toContain("Pruned alpha")
+        expect(applied.warnings.join("\n")).toContain(
+            "alpha/web: worktree outside task scope"
+        )
+        expect(fs.existsSync(taskDir("alpha", "api"))).toBe(false)
+        expect(await branchExists("api", "alpha")).toBe(false)
+        expect(fs.existsSync(taskDir("alpha", "web"))).toBe(true)
+        expect(await branchExists("web", "alpha")).toBe(true)
+    })
+
+    it("a dirty stray does not pin a scoped task open (dirty-check is in-scope only)", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        await openWorktree("api", "alpha")
+        const webWt = await openWorktree("web", "alpha")
+        await landTask("api", "alpha") // in-scope, merged + clean
+        await writeScope("alpha", ["api"])
+        // Dirty the OUT-OF-SCOPE stray: it must not keep the task active.
+        await fsp.writeFile(path.join(webWt, "README.md"), "uncommitted\n")
+
+        const { logs } = await captureOutput(async () => {
+            await prune.run({ force: false })
+        })
+        // Scoped to api (merged + clean) -> prunable despite the dirty stray.
+        expect(logs.join("\n")).toContain("would prune alpha (api)")
     })
 
     it("--force prunes a merged task across every repo and leaves an unmerged task", async () => {
@@ -324,5 +415,82 @@ describe("prune command", () => {
             process.chdir(root)
             await fsp.rm(orphan, { recursive: true, force: true })
         }
+    })
+
+    type PruneJson = {
+        forced: boolean
+        tasks: { task: string; status: string; reason?: string }[]
+    }
+
+    describe("--json", () => {
+        it("emits { forced:false, tasks:[] } under --json when there are no open tasks", async () => {
+            await makeSource("api")
+            await register(["api"])
+
+            const json = await captureJson<PruneJson>(async () => {
+                await prune.run({ force: false })
+            })
+            expect(json).toEqual({ forced: false, tasks: [] })
+        })
+
+        it("preview --json: prunable tasks read as pruned candidates, kept ones carry reasons", async () => {
+            await makeSource("api")
+            await register(["api"])
+            // done: merged → prunable. active: unmerged → kept.
+            await openWorktree("api", "done")
+            await landTask("api", "done")
+            await openWorktree("api", "active")
+            await activateTask("api", "active")
+
+            const json = await captureJson<PruneJson>(async () => {
+                await prune.run({ force: false })
+            })
+            // forced:false signals nothing was removed; candidates first (the
+            // prunable list, sorted), then the kept tasks with their reasons.
+            expect(json).toEqual({
+                forced: false,
+                tasks: [
+                    { task: "done", status: "pruned" },
+                    { task: "active", status: "kept", reason: "unmerged" }
+                ]
+            })
+        })
+
+        it("force --json: prunes the merged task and keeps the unmerged one", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await openWorktree("api", "done")
+            await landTask("api", "done")
+            await openWorktree("api", "active")
+            await activateTask("api", "active")
+
+            const json = await captureJson<PruneJson>(async () => {
+                await prune.run({ force: true })
+            })
+            expect(json).toEqual({
+                forced: true,
+                tasks: [
+                    { task: "done", status: "pruned" },
+                    { task: "active", status: "kept", reason: "unmerged" }
+                ]
+            })
+        })
+
+        it("keeps a merged-but-dirty task under --json with reason:dirty", async () => {
+            await makeSource("api")
+            await register(["api"])
+            const wt = await openWorktree("api", "done")
+            await landTask("api", "done")
+            // Uncommitted change makes the otherwise-merged worktree dirty.
+            await fsp.writeFile(path.join(wt, "README.md"), "uncommitted\n")
+
+            const json = await captureJson<PruneJson>(async () => {
+                await prune.run({ force: true })
+            })
+            expect(json).toEqual({
+                forced: true,
+                tasks: [{ task: "done", status: "kept", reason: "dirty" }]
+            })
+        })
     })
 })

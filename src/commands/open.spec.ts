@@ -5,11 +5,37 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { promisify } from "node:util"
 import { terminal } from "cmdore"
+import { vi } from "vitest"
 import open from "@/commands/open"
 import { CONFIG_FILENAME } from "@/config"
 import { UBERTASK_FILENAME } from "@/tasks"
+import { parse } from "@/ubertask"
 
 const exec = promisify(execFile)
+
+// Run `fn` with jsonMode enabled, returning the single parsed JSON object the
+// command wrote to stdout. Resets jsonMode in finally before any assertion can
+// throw, so a failing expect() never leaks jsonMode into sibling suites.
+const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
+    const written: string[] = []
+    const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: string | Uint8Array): boolean => {
+            written.push(chunk.toString())
+            return true
+        })
+    terminal.jsonMode = true
+    try {
+        await fn()
+    } finally {
+        terminal.jsonMode = false
+        spy.mockRestore()
+    }
+    const output = written.join("")
+    expect(written).toEqual([output])
+    expect(output.endsWith("\n")).toBe(true)
+    return JSON.parse(output) as T
+}
 
 // The seed open stamps lives in the repo's template/ dir and is the single
 // source of truth — read it off disk (resolved relative to this spec, the way
@@ -67,6 +93,8 @@ describe("open command", () => {
     })
 
     afterEach(async () => {
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -94,6 +122,26 @@ describe("open command", () => {
         )
     }
 
+    // Register flat names AND a hooks map, so the hook wiring can be exercised.
+    const registerWithHooks = async (
+        names: string[],
+        hooks: Record<string, string>
+    ): Promise<void> => {
+        await fsp.writeFile(
+            configPath,
+            `${JSON.stringify(
+                {
+                    repositories: names.map(
+                        (n) => `https://github.com/acme/${n}.git`
+                    ),
+                    hooks
+                },
+                null,
+                4
+            )}\n`
+        )
+    }
+
     // Realpath of <root>/tasks/<task>/<name>, for comparing against the path
     // git reports (which is canonicalised under /private/var on macOS).
     const worktreeReal = async (task: string, name: string): Promise<string> =>
@@ -111,7 +159,13 @@ describe("open command", () => {
         await register(["api", "web"])
 
         const logs = await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         for (const name of ["api", "web"]) {
@@ -136,7 +190,13 @@ describe("open command", () => {
         await register(["api"])
 
         await captureLogs(async () => {
-            await open.run({ task: "alpha", from: "base" })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: "base",
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         const wt = path.join(root, "tasks", "alpha", "api")
@@ -155,7 +215,13 @@ describe("open command", () => {
         await register(["api"])
 
         await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         const wt = path.join(root, "tasks", "alpha", "api")
@@ -168,7 +234,13 @@ describe("open command", () => {
         await register(["api"])
 
         const first = await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
         expect(first.join("\n")).toContain("Opened task alpha in 1 repository")
         const apiReal = await worktreeReal("alpha", "api")
@@ -178,7 +250,13 @@ describe("open command", () => {
         await register(["api", "web"])
 
         const second = await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         // api is left exactly as it was (same path, not recreated)...
@@ -198,7 +276,13 @@ describe("open command", () => {
         await register(["api", "web"])
 
         const logs = await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         // The note lands at the TASK dir — a sibling of the per-repo worktree
@@ -225,7 +309,13 @@ describe("open command", () => {
         await register(["api"])
 
         await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         // Mutate the note to a sentinel, then re-run open (the recovery path).
@@ -234,11 +324,125 @@ describe("open command", () => {
         await fsp.writeFile(note, edited)
 
         const second = await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         // The hand-edited note is preserved verbatim — never clobbered.
         expect(await fsp.readFile(note, "utf8")).toBe(edited)
+        expect(second.join("\n")).toContain(
+            `Skipping ${path.join("tasks", "alpha", UBERTASK_FILENAME)} — already exists`
+        )
+    })
+
+    it("--goal seeds a fresh note with the goal populated", async () => {
+        await makeSource("api")
+        await register(["api"])
+
+        const logs = await captureLogs(async () => {
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: "Kill the SSO redirect loop",
+                repos: undefined
+            })
+        })
+
+        const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+        // Parsed note carries the goal; the rest keeps the documented empty
+        // defaults (so #1's JSON shape stays predictable).
+        expect(parse(await fsp.readFile(note, "utf8"))).toEqual({
+            goal: "Kill the SSO redirect loop",
+            repos: [],
+            tickets: [],
+            decisions: [],
+            blockers: []
+        })
+        expect(logs.join("\n")).toContain(
+            `Seeded ${path.join("tasks", "alpha", UBERTASK_FILENAME)} (goal set)`
+        )
+    })
+
+    it("--goal updates the goal in place, preserving every other field", async () => {
+        await makeSource("api")
+        await register(["api"])
+
+        // A note that already carries tickets/decisions/blockers + an old goal.
+        await captureLogs(async () => {
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
+        })
+        const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+        const rich =
+            "goal: |\n  old goal\n\n" +
+            "tickets:\n  - https://acme/PROJ-1\n\n" +
+            "decisions:\n  - note: |\n      keep v1 alive\n    repo: api\n\n" +
+            "blockers:\n  - note: |\n      needs api on :8080\n"
+        await fsp.writeFile(note, rich)
+
+        const logs = await captureLogs(async () => {
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: "new goal",
+                repos: undefined
+            })
+        })
+
+        // Only `goal` changed; tickets/decisions/blockers survived intact.
+        expect(parse(await fsp.readFile(note, "utf8"))).toEqual({
+            goal: "new goal",
+            repos: [],
+            tickets: ["https://acme/PROJ-1"],
+            decisions: [{ note: "keep v1 alive", repo: "api" }],
+            blockers: [{ note: "needs api on :8080" }]
+        })
+        expect(logs.join("\n")).toContain(
+            `Updated goal in ${path.join("tasks", "alpha", UBERTASK_FILENAME)}`
+        )
+    })
+
+    it("without --goal, an existing goal-bearing note is left untouched", async () => {
+        await makeSource("api")
+        await register(["api"])
+
+        // Seed WITH a goal, then re-run open with no --goal: no-clobber holds.
+        await captureLogs(async () => {
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: "keep me",
+                repos: undefined
+            })
+        })
+        const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+        const before = await fsp.readFile(note, "utf8")
+
+        const second = await captureLogs(async () => {
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
+        })
+
+        // Byte-identical: the no-goal re-run never rewrites the note.
+        expect(await fsp.readFile(note, "utf8")).toBe(before)
         expect(second.join("\n")).toContain(
             `Skipping ${path.join("tasks", "alpha", UBERTASK_FILENAME)} — already exists`
         )
@@ -254,6 +458,8 @@ describe("open command", () => {
                 "goal: |\n" +
                 "  <one line: what done looks like & why>\n" +
                 "\n" +
+                "repos: []\n" +
+                "\n" +
                 "tickets: []\n" +
                 "\n" +
                 "decisions: []\n" +
@@ -268,7 +474,13 @@ describe("open command", () => {
         await register(["api", "web"])
 
         const logs = await captureLogs(async () => {
-            await open.run({ task: "alpha", from: undefined })
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
         })
 
         expect(fs.existsSync(path.join(root, "tasks", "alpha", "api"))).toBe(
@@ -292,7 +504,13 @@ describe("open command", () => {
         let error: unknown
         await captureLogs(async () => {
             try {
-                await open.run({ task: "alpha", from: "does-not-exist" })
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: "does-not-exist",
+                    goal: undefined,
+                    repos: undefined
+                })
             } catch (e) {
                 error = e
             }
@@ -311,7 +529,13 @@ describe("open command", () => {
         try {
             let error: unknown
             try {
-                await open.run({ task: "alpha", from: undefined })
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
             } catch (e) {
                 error = e
             }
@@ -321,5 +545,461 @@ describe("open command", () => {
             process.chdir(root)
             await fsp.rm(orphan, { recursive: true, force: true })
         }
+    })
+
+    // The task's declared scope: the parsed repos: from its ubertask.yml.
+    const scopeOf = async (task: string): Promise<string[]> => {
+        const note = path.join(root, "tasks", task, UBERTASK_FILENAME)
+        return parse(await fsp.readFile(note, "utf8")).repos
+    }
+
+    describe("--repos (declared scope)", () => {
+        it("opens worktrees only for the named repos and persists the scope", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await makeSource("docs")
+            await register(["api", "web", "docs"])
+
+            const logs = await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api", "web"]
+                })
+            })
+
+            // Only the named repos grew worktrees; the unnamed one did not.
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(true)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "docs"))
+            ).toBe(false)
+            // The scope is recorded in the note's repos:.
+            expect(await scopeOf("alpha")).toEqual(["api", "web"])
+            const joined = logs.join("\n")
+            expect(joined).toContain("Opened task alpha in 2 repositories")
+            expect(joined).toContain(
+                `Seeded ${path.join("tasks", "alpha", UBERTASK_FILENAME)} (scope set)`
+            )
+        })
+
+        it("--goal and --repos together seed the goal AND the scope", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: "scoped goal",
+                    repos: ["api"]
+                })
+            })
+
+            const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+            expect(parse(await fsp.readFile(note, "utf8"))).toEqual({
+                goal: "scoped goal",
+                repos: ["api"],
+                tickets: [],
+                decisions: [],
+                blockers: []
+            })
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(false)
+        })
+
+        it("fails fast on an unknown/uncloned repo and creates NOTHING", async () => {
+            await makeSource("api")
+            // web is registered but never cloned; ghost was never registered.
+            await register(["api", "web"])
+
+            let error: unknown
+            await captureLogs(async () => {
+                try {
+                    await open.run({
+                        "no-hooks": false,
+                        task: "alpha",
+                        from: undefined,
+                        goal: undefined,
+                        repos: ["api", "ghost"]
+                    })
+                } catch (e) {
+                    error = e
+                }
+            })
+
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toContain("ghost")
+            // Nothing was created — not even the valid repo's worktree or note.
+            expect(fs.existsSync(path.join(root, "tasks", "alpha"))).toBe(false)
+        })
+
+        it("rejects a registered-but-uncloned repo (cloned = source/<name> exists)", async () => {
+            await makeSource("api")
+            await register(["api", "web"]) // web registered, not cloned
+
+            let error: unknown
+            await captureLogs(async () => {
+                try {
+                    await open.run({
+                        "no-hooks": false,
+                        task: "alpha",
+                        from: undefined,
+                        goal: undefined,
+                        repos: ["api", "web"]
+                    })
+                } catch (e) {
+                    error = e
+                }
+            })
+
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toContain("web")
+            expect(fs.existsSync(path.join(root, "tasks", "alpha"))).toBe(false)
+        })
+
+        it("is sticky: re-opening WITHOUT --repos honours the stored scope (no fan-out)", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            // Scope the task to api only.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api"]
+                })
+            })
+            expect(await scopeOf("alpha")).toEqual(["api"])
+
+            // Re-open with NO --repos: must NOT fan out to web.
+            const logs = await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(false)
+            // Scope unchanged; the note isn't rewritten (no growth, no goal).
+            expect(await scopeOf("alpha")).toEqual(["api"])
+            expect(logs.join("\n")).toContain(
+                `Skipping ${path.join("tasks", "alpha", UBERTASK_FILENAME)} — already exists`
+            )
+        })
+
+        it("unions a re-open's --repos into an existing scope (never replaces)", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await makeSource("docs")
+            await register(["api", "web", "docs"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api"]
+                })
+            })
+
+            // Re-open adding web: api stays, web joins, docs still excluded.
+            const logs = await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["web"]
+                })
+            })
+
+            expect(await scopeOf("alpha")).toEqual(["api", "web"])
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(true)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "docs"))
+            ).toBe(false)
+            expect(logs.join("\n")).toContain(
+                `Updated scope in ${path.join("tasks", "alpha", UBERTASK_FILENAME)}`
+            )
+        })
+
+        it("an unscoped task (no --repos ever) keeps the all-cloned behaviour", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            // Both cloned repos opened; the recorded scope is empty (unscoped).
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(true)
+            expect(await scopeOf("alpha")).toEqual([])
+        })
+    })
+
+    type OpenJson = {
+        task: string
+        scope: string[]
+        repos: { name: string; status: string }[]
+        hooks: { event: string; repo: string; exit: number }[]
+        note?: {
+            goal: string
+            repos: string[]
+            tickets: string[]
+            decisions: unknown[]
+            blockers: unknown[]
+            mtime: number
+        }
+    }
+
+    describe("--json", () => {
+        it("emits task, empty scope, created repos, and the seeded note", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            expect(json.task).toBe("alpha")
+            expect(json.scope).toEqual([])
+            expect(json.repos).toEqual([
+                { name: "api", status: "created" },
+                { name: "web", status: "created" }
+            ])
+            // A fresh task byte-copies the template seed; the JSON carries the
+            // same TaskNote shape status uses (the template's placeholder goal,
+            // empty lists), with a numeric mtime.
+            expect(json.note).toEqual({
+                goal: "<one line: what done looks like & why>",
+                repos: [],
+                tickets: [],
+                decisions: [],
+                blockers: [],
+                mtime: expect.any(Number)
+            })
+        })
+
+        it("carries the goal, the declared scope, and a skipped re-open under --json", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            // First open scopes to api with a goal.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: "ship it",
+                    repos: ["api"]
+                })
+            })
+
+            // Re-open (same scope, same goal absent): api's worktree is skipped.
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            expect(json.scope).toEqual(["api"])
+            expect(json.repos).toEqual([{ name: "api", status: "skipped" }])
+            expect(json.note?.goal).toBe("ship it")
+            expect(json.note?.repos).toEqual(["api"])
+        })
+
+        it("emits empty scope/repos and no note when nothing is cloned", async () => {
+            await register(["api"]) // registered, never cloned
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            expect(json).toEqual({
+                task: "alpha",
+                scope: [],
+                repos: [],
+                hooks: []
+            })
+            expect(json.note).toBeUndefined()
+        })
+    })
+
+    describe("hooks", () => {
+        it("fires post-open ONLY for newly-created worktrees, not skipped ones", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await registerWithHooks(["api", "web"], {
+                "post-open": "touch hooked"
+            })
+
+            // First open: both worktrees created → both hooks fire.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            const apiHook = path.join(root, "tasks", "alpha", "api", "hooked")
+            const webHook = path.join(root, "tasks", "alpha", "web", "hooked")
+            expect(fs.existsSync(apiHook)).toBe(true)
+            expect(fs.existsSync(webHook)).toBe(true)
+            // Remove the sentinels so a re-fire would be detectable.
+            await fsp.rm(apiHook)
+            await fsp.rm(webHook)
+
+            // Re-open: both worktrees already exist → skipped, no hook re-fires.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            expect(fs.existsSync(apiHook)).toBe(false)
+            expect(fs.existsSync(webHook)).toBe(false)
+        })
+
+        it("runs the hook with cwd = the worktree and includes hooks under --json", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], { "post-open": "true" })
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            expect(json.hooks).toEqual([
+                { event: "post-open", repo: "api", exit: 0 }
+            ])
+        })
+
+        it("does not run hooks under --no-hooks", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], { "post-open": "touch hooked" })
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": true,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            expect(json.hooks).toEqual([])
+            expect(
+                fs.existsSync(
+                    path.join(root, "tasks", "alpha", "api", "hooked")
+                )
+            ).toBe(false)
+        })
+
+        it("continues past a failing hook and exits non-zero, leaving the worktree intact", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await registerWithHooks(["api", "web"], {
+                // api's hook fails; web's still runs.
+                "post-open": 'test "$UBEREPO_REPO" = api && exit 1 || touch ok'
+            })
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: OpenJson
+            try {
+                json = await captureJson<OpenJson>(async () => {
+                    await open.run({
+                        "no-hooks": false,
+                        task: "alpha",
+                        from: undefined,
+                        goal: undefined,
+                        repos: undefined
+                    })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // Both worktrees were created (no rollback) and on the task branch.
+            expect(json.repos).toEqual([
+                { name: "api", status: "created" },
+                { name: "web", status: "created" }
+            ])
+            expect(await branchAt("api", "alpha")).toBe("task/alpha")
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            // The loop continued: web's hook ran after api's failure.
+            expect(json.hooks).toEqual([
+                { event: "post-open", repo: "api", exit: 1 },
+                { event: "post-open", repo: "web", exit: 0 }
+            ])
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web", "ok"))
+            ).toBe(true)
+        })
     })
 })

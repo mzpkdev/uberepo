@@ -34,16 +34,27 @@ across them at once and switch tasks by switching directories — not `git check
 1. **Orient.** Run `uberepo status --json` (open tasks + each worktree's
    branch/clean-dirty) and `uberepo sources --json` (registered repos +
    cloned-or-not). Parse the JSON; don't scrape human text. Re-read before
-   reporting state.
+   reporting state. `--json` is a global flag on **every** command — pass it to
+   any command for a single stable JSON object describing its outcome.
 2. **Work the lifecycle** (one task = one `task/<task>` branch across every repo):
-   - `uberepo open <task>` — worktree + `task/<task>` branch in every cloned repo
-     (`--from <ref>` to choose a base). Idempotent.
+   - `uberepo open <task>` — worktree + `task/<task>` branch in every cloned repo.
+     `--from <ref>` chooses a base; `--goal "<text>"` sets the task note's goal;
+     `--repos <name>...` scopes the task to those repos (and is unioned in on
+     re-open). Idempotent.
    - Edit in `tasks/<task>/<name>/`. **Commit and push per repo yourself** —
      uberepo does NOT commit or push. Follow each repo's own AGENTS.md/README.
    - `uberepo sync <task>` — rebase each worktree onto its fresh default branch.
      Refuses a dirty worktree; stops on conflict and leaves that repo mid-rebase.
+   - `uberepo ship <task>` — push each repo's branch and open a **draft** PR per
+     repo. Needs the GitHub CLI (`gh`) unless `--no-pr`. `--title`/`--body`
+     override; otherwise title = goal's first line, body = the repo's `.github` PR
+     template. Re-run to fill gaps: it skips repos with nothing to ship and leaves
+     an existing PR untouched (push refreshes it).
    - `uberepo close <task>` — remove worktrees + delete the branch. Refuses
      uncommitted/unmerged work; `--force` only when the work is saved.
+   - **Hooks (optional):** if `uberepo.json` has a `hooks` map, `post-clone` /
+     `post-open` / `post-sync` shell commands run per repo after that git op lands
+     (cwd = the repo/worktree; see reference.md). `--no-hooks` skips them.
 3. **For flags, sharing, and refusal-recovery**, read [reference.md](reference.md).
    `uberepo --help` lists every command and flag.
 

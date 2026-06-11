@@ -194,6 +194,57 @@ describe("status command", () => {
         expect(logs[0]).toContain(`${UBERTASK_FILENAME} · updated 2h ago`)
     })
 
+    it("shows the note's goal on its own line under the heading", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+        await writeNote("alpha", "goal: |\n  ship the new login flow\n")
+
+        const logs = await captureLogs(async () => {
+            await status.run({ task: undefined })
+        })
+
+        // Heading first, then an indented goal line, THEN the repo lines.
+        expect(logs[0]).toContain("alpha")
+        expect(logs[1]).toBe("  goal: ship the new login flow")
+        expect(logs[2]).toContain("api")
+    })
+
+    it("truncates a long goal to a single line with an ellipsis", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+        const long = "x".repeat(200)
+        await writeNote("alpha", `goal: |\n  ${long}\n`)
+
+        const logs = await captureLogs(async () => {
+            await status.run({ task: undefined })
+        })
+
+        const goalLine = logs.find((l) => l.startsWith("  goal: "))
+        expect(goalLine).toBeDefined()
+        expect((goalLine as string).endsWith("…")).toBe(true)
+        // Far shorter than the raw 200-char goal — it was capped, not printed whole.
+        expect((goalLine as string).length).toBeLessThan(90)
+    })
+
+    it("shows the freshness marker but no goal line for a goal-less note", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+        // A note with empty fields (e.g. the bare seed with goal cleared).
+        await writeNote("alpha", "goal: |\n\ntickets: []\n")
+
+        const logs = await captureLogs(async () => {
+            await status.run({ task: undefined })
+        })
+
+        expect(logs[0]).toContain(`${UBERTASK_FILENAME} · updated`)
+        // No goal line: the next line is the repo line, not "  goal: ".
+        expect(logs.some((l) => l.startsWith("  goal:"))).toBe(false)
+        expect(logs[1]).toContain("api")
+    })
+
     it("omits the note marker when the task has no ubertask.yml", async () => {
         await makeSource("api")
         await register(["api"])
@@ -363,7 +414,7 @@ describe("status command", () => {
         ])
     })
 
-    it("includes the note's presence + mtime in the JSON payload", async () => {
+    it("includes the parsed note + mtime in the JSON payload", async () => {
         await makeSource("api")
         await register(["api"])
         await openWorktree("api", "alpha")
@@ -375,13 +426,62 @@ describe("status command", () => {
         })
 
         const parsed = JSON.parse(written.join("")) as Task[]
+        // The note carries its parsed fields (goal + the always-present empty
+        // lists) alongside mtime — the stable shape downstream JSON consumers
+        // read. Default writeNote content is `goal: | / do the thing`.
         expect(parsed).toEqual([
             {
                 name: "alpha",
                 repos: [{ name: "api", branch: "task/alpha", dirty: false }],
-                note: { mtime: mtime.getTime() }
+                note: {
+                    goal: "do the thing",
+                    repos: [],
+                    tickets: [],
+                    decisions: [],
+                    blockers: [],
+                    mtime: mtime.getTime()
+                }
             }
         ])
+    })
+
+    it("surfaces a task's declared scope: a `scope:` line in human output, `repos` in JSON", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        await openWorktree("api", "alpha")
+        await openWorktree("web", "alpha")
+        // A note that owns only `api` and `web` (the task's declared scope).
+        await writeNote(
+            "alpha",
+            "goal: |\n  scoped goal\n\nrepos:\n  - api\n  - web\n"
+        )
+
+        const logs = await captureLogs(async () => {
+            await status.run({ task: "alpha" })
+        })
+        // Human view singles out the owned repos on a `scope:` line.
+        expect(logs.join("\n")).toContain("scope: api, web")
+
+        const written = await captureJson(async () => {
+            await status.run({ task: "alpha" })
+        })
+        const parsed = JSON.parse(written.join("")) as Task[]
+        // JSON carries the same scope under note.repos (flows from Ubertask).
+        expect(parsed[0].note?.repos).toEqual(["api", "web"])
+    })
+
+    it("omits the `scope:` line for an unscoped task (repos: [])", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+        await writeNote("alpha", "goal: |\n  g\n\nrepos: []\n")
+
+        const logs = await captureLogs(async () => {
+            await status.run({ task: "alpha" })
+        })
+        // Unscoped → nothing to single out; no scope line.
+        expect(logs.join("\n")).not.toContain("scope:")
     })
 
     it("omits the note key from the JSON payload when absent", async () => {

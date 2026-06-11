@@ -2,6 +2,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { Config, TASKS_DIR } from "@/config"
 import git from "@/git"
+import type { Ubertask } from "@/ubertask"
+import * as ubertask from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
 // The on-disk location of a repo's worktree for a task:
@@ -30,11 +32,12 @@ export type TaskRepo = {
     dirty: boolean
 }
 
-// The per-task durable note (ubertask.yml) when present, surfaced as freshness
-// only: `mtime` is its last-modified time in epoch milliseconds (fs.stat). The
-// file is never parsed — git holds the live state; this is just "how stale is
-// the standing context". Absent file → omitted, so `note` undefined means none.
-export type TaskNote = {
+// The per-task durable note (ubertask.yml) when present: its parsed contents
+// (goal / tickets / decisions / blockers — the `why` git can't regenerate) plus
+// `mtime`, its last-modified time in epoch milliseconds (fs.stat) for freshness.
+// The parsed fields are always present (goal "" / lists [] when unset), so the
+// shape is stable. Absent file → omitted, so `note` undefined means none.
+export type TaskNote = Ubertask & {
     mtime: number
 }
 
@@ -45,6 +48,45 @@ export type Task = {
     name: string
     repos: TaskRepo[]
     note?: TaskNote
+}
+
+// A task's declared scope: the flat source/<name> repos it OWNS, read from its
+// ubertask.yml `repos:`. [] means unscoped — commands fan out to every cloned
+// repo with a worktree, the original behaviour. A missing/parseless note is
+// also unscoped. Tolerant by the same logic as readNote: the note is a hint, so
+// a half-edited one never breaks a command — it just reads as unscoped.
+export const taskScope = async (
+    root: string,
+    task: string
+): Promise<string[]> => {
+    const file = path.join(root, TASKS_DIR, task, UBERTASK_FILENAME)
+    const note = await ubertask.read(file)
+    return note?.repos ?? []
+}
+
+// Split a task's worktree-bearing repos against its declared scope: the repos
+// to operate on (in-scope ∩ has-worktree, or all worktree-bearing when
+// unscoped) and the strays (worktrees OUTSIDE a non-empty scope). The caller
+// warns about strays and acts only on `inScope`, so a drifted worktree is
+// neither silently touched nor silently ignored. `present` is the set of repo
+// names that currently have a worktree for the task; order is preserved.
+export const partitionScope = (
+    present: string[],
+    scope: string[]
+): { inScope: string[]; strays: string[] } => {
+    if (scope.length === 0) {
+        return { inScope: present, strays: [] }
+    }
+    const inScope: string[] = []
+    const strays: string[] = []
+    for (const name of present) {
+        if (scope.includes(name)) {
+            inScope.push(name)
+        } else {
+            strays.push(name)
+        }
+    }
+    return { inScope, strays }
 }
 
 // Parse a worktree path of the form <root>/tasks/<task>/<name> into its task
@@ -113,18 +155,26 @@ export const openTasks = async (options?: {
     )
 }
 
-// The durable note's freshness for a task, or undefined when it has none. Reads
-// only fs.stat mtime — never the file contents (git owns the live state); the
-// note is a standing hint whose staleness is all status needs to surface.
+// The durable note for a task, or undefined when it has none: its parsed
+// contents (the standing `why`) plus its mtime for freshness. Parsing is
+// tolerant — a partial / hand-edited note yields its best interpretation rather
+// than throwing, so a malformed note never breaks a read-only `status`.
 const readNote = async (
     root: string,
     task: string
 ): Promise<TaskNote | undefined> => {
     const file = path.join(root, TASKS_DIR, task, UBERTASK_FILENAME)
+    let stat: fs.Stats
     try {
-        const stat = await fs.promises.stat(file)
-        return { mtime: stat.mtimeMs }
+        stat = await fs.promises.stat(file)
     } catch {
         return undefined
     }
+    const parsed = await ubertask.read(file)
+    // stat saw the file; a vanished file between stat and read (or a non-file)
+    // is the only way read() comes back empty — treat it as "no note".
+    if (!parsed) {
+        return undefined
+    }
+    return { ...parsed, mtime: stat.mtimeMs }
 }

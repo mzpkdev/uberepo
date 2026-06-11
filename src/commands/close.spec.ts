@@ -5,10 +5,35 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { promisify } from "node:util"
 import { terminal } from "cmdore"
+import { vi } from "vitest"
 import close from "@/commands/close"
 import { CONFIG_FILENAME } from "@/config"
 
 const exec = promisify(execFile)
+
+// Run `fn` with jsonMode enabled, returning the single parsed JSON object the
+// command wrote to stdout. Resets jsonMode in finally before any assertion can
+// throw, so a failing expect() never leaks jsonMode into sibling suites.
+const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
+    const written: string[] = []
+    const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: string | Uint8Array): boolean => {
+            written.push(chunk.toString())
+            return true
+        })
+    terminal.jsonMode = true
+    try {
+        await fn()
+    } finally {
+        terminal.jsonMode = false
+        spy.mockRestore()
+    }
+    const output = written.join("")
+    expect(written).toEqual([output])
+    expect(output.endsWith("\n")).toBe(true)
+    return JSON.parse(output) as T
+}
 
 // Run a git command directly (NOT the wrapper under test) so test setup and
 // assertions stay independent of git.ts.
@@ -69,6 +94,8 @@ describe("close command", () => {
     })
 
     afterEach(async () => {
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -144,6 +171,18 @@ describe("close command", () => {
     const taskDir = (task: string, name: string): string =>
         path.join(root, "tasks", task, name)
 
+    // Write a ubertask.yml at the task level declaring a scope (the repos: the
+    // task owns), so close can be exercised against a scoped task.
+    const writeScope = async (task: string, repos: string[]): Promise<void> => {
+        const dir = path.join(root, "tasks", task)
+        await fsp.mkdir(dir, { recursive: true })
+        const list = repos.map((r) => `  - ${r}`).join("\n")
+        await fsp.writeFile(
+            path.join(dir, "ubertask.yml"),
+            `goal: |\n  g\n\nrepos:\n${list}\n`
+        )
+    }
+
     it("closes a fully-merged task: removes every worktree and deletes the branch", async () => {
         await makeSource("api")
         await makeSource("web")
@@ -163,6 +202,34 @@ describe("close command", () => {
         expect(joined).toContain("api: closed")
         expect(joined).toContain("web: closed")
         expect(joined).toContain("Closed task alpha in 2 repositories")
+    })
+
+    it("respects a declared scope: closes in-scope repos and warns about a stray worktree", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        await openWorktree("api", "alpha")
+        await openWorktree("web", "alpha")
+        // Scope owns api only; web's worktree is drift.
+        await writeScope("alpha", ["api"])
+
+        const { logs, warnings } = await captureOutput(async () => {
+            await close.run({ task: "alpha", force: false })
+        })
+
+        // api (in scope) closed: worktree + branch gone.
+        expect(fs.existsSync(taskDir("alpha", "api"))).toBe(false)
+        expect(await branchExists("api", "alpha")).toBe(false)
+        // web (the stray) left standing, with a warning.
+        expect(fs.existsSync(taskDir("alpha", "web"))).toBe(true)
+        expect(await branchExists("web", "alpha")).toBe(true)
+        expect(warnings.join("\n")).toContain(
+            "web: worktree outside task scope"
+        )
+        const joined = logs.join("\n")
+        expect(joined).toContain("api: closed")
+        expect(joined).not.toContain("web: closed")
+        expect(joined).toContain("Closed task alpha in 1 repository")
     })
 
     it("without --force, skips a repo with uncommitted changes; --force closes it", async () => {
@@ -309,5 +376,96 @@ describe("close command", () => {
             process.chdir(root)
             await fsp.rm(orphan, { recursive: true, force: true })
         }
+    })
+
+    type CloseJson = {
+        task: string
+        forced: boolean
+        repos: { name: string; status: string; reason?: string }[]
+    }
+
+    describe("--json", () => {
+        it("emits closed repos and forced:false for a clean merged task", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            await openWorktree("api", "alpha")
+            await openWorktree("web", "alpha")
+
+            const json = await captureJson<CloseJson>(async () => {
+                await close.run({ task: "alpha", force: false })
+            })
+            expect(json).toEqual({
+                task: "alpha",
+                forced: false,
+                repos: [
+                    { name: "api", status: "closed" },
+                    { name: "web", status: "closed" }
+                ]
+            })
+        })
+
+        it("emits skipped with reason for dirty and unmerged repos under --json", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            const apiWt = await openWorktree("api", "alpha")
+            const webWt = await openWorktree("web", "alpha")
+            // api dirty (uncommitted), web unmerged (committed, unpushed).
+            await fsp.writeFile(path.join(apiWt, "README.md"), "uncommitted\n")
+            await fsp.writeFile(path.join(webWt, "feature.txt"), "work\n")
+            await sh(webWt, "add", "feature.txt")
+            await sh(webWt, "commit", "-m", "feature work")
+
+            const json = await captureJson<CloseJson>(async () => {
+                await close.run({ task: "alpha", force: false })
+            })
+            expect(json).toEqual({
+                task: "alpha",
+                forced: false,
+                repos: [
+                    {
+                        name: "api",
+                        status: "skipped",
+                        reason: "uncommitted changes"
+                    },
+                    {
+                        name: "web",
+                        status: "skipped",
+                        reason: "unmerged commits"
+                    }
+                ]
+            })
+        })
+
+        it("emits forced:true and closed under --json when --force overrides", async () => {
+            await makeSource("api")
+            await register(["api"])
+            const wt = await openWorktree("api", "alpha")
+            await fsp.writeFile(path.join(wt, "README.md"), "uncommitted\n")
+
+            const json = await captureJson<CloseJson>(async () => {
+                await close.run({ task: "alpha", force: true })
+            })
+            expect(json).toEqual({
+                task: "alpha",
+                forced: true,
+                repos: [{ name: "api", status: "closed" }]
+            })
+        })
+
+        it("emits empty repos under --json when the task is not open", async () => {
+            await makeSource("api")
+            await register(["api"])
+
+            const json = await captureJson<CloseJson>(async () => {
+                await close.run({ task: "ghost", force: false })
+            })
+            expect(json).toEqual({
+                task: "ghost",
+                forced: false,
+                repos: []
+            })
+        })
     })
 })

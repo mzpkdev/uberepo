@@ -1,9 +1,35 @@
 import * as fsp from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
+import { terminal } from "cmdore"
+import { vi } from "vitest"
 import init from "@/commands/init"
 import { CONFIG_FILENAME } from "@/config"
 import { UBERTASK_FILENAME } from "@/tasks"
+
+// Run `fn` with jsonMode enabled, returning the single parsed JSON object the
+// command wrote to stdout. Resets jsonMode in finally before any assertion can
+// throw, so a failing expect() never leaks jsonMode into sibling suites.
+const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
+    const written: string[] = []
+    const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: string | Uint8Array): boolean => {
+            written.push(chunk.toString())
+            return true
+        })
+    terminal.jsonMode = true
+    try {
+        await fn()
+    } finally {
+        terminal.jsonMode = false
+        spy.mockRestore()
+    }
+    const output = written.join("")
+    expect(written).toEqual([output])
+    expect(output.endsWith("\n")).toBe(true)
+    return JSON.parse(output) as T
+}
 
 const AGENTS_FILENAME = "AGENTS.md"
 const CLAUDE_FILENAME = "CLAUDE.md"
@@ -101,6 +127,8 @@ describe("init command", () => {
     })
 
     afterEach(async () => {
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -339,5 +367,35 @@ describe("init command", () => {
         expect((error as Error).message).toContain("refusing to overwrite.")
 
         expect(await fsp.readFile(target, "utf8")).toBe(existing)
+    })
+
+    it("emits { workspace, created:true, agents:true } under --json for a fresh init", async () => {
+        const json = await captureJson<{
+            workspace: string
+            created: boolean
+            agents: boolean
+        }>(async () => {
+            await init.run({ name: undefined, "no-agents": false })
+        })
+        // Default init seeds the agent files; workspace is the cwd it created in.
+        expect(json).toEqual({ workspace: tmp, created: true, agents: true })
+    })
+
+    it("emits agents:false under --json when --no-agents is set", async () => {
+        const json = await captureJson<{
+            workspace: string
+            created: boolean
+            agents: boolean
+        }>(async () => {
+            await init.run({ name: undefined, "no-agents": true })
+        })
+        expect(json).toEqual({ workspace: tmp, created: true, agents: false })
+    })
+
+    it("reports the resolved workspace dir under --json when given a name", async () => {
+        const json = await captureJson<{ workspace: string }>(async () => {
+            await init.run({ name: "child", "no-agents": false })
+        })
+        expect(json.workspace).toBe(path.join(tmp, "child"))
     })
 })

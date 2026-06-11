@@ -2,11 +2,36 @@ import * as fsp from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
 import { terminal } from "cmdore"
+import { vi } from "vitest"
 import add from "@/commands/add"
 import { CONFIG_FILENAME } from "@/config"
 
 const readConfig = async (file: string): Promise<unknown> => {
     return JSON.parse(await fsp.readFile(file, "utf8"))
+}
+
+// Run `fn` with jsonMode enabled, returning the single parsed JSON object the
+// command wrote to stdout. Resets jsonMode in finally before any assertion can
+// throw, so a failing expect() never leaks jsonMode into sibling suites.
+const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
+    const written: string[] = []
+    const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: string | Uint8Array): boolean => {
+            written.push(chunk.toString())
+            return true
+        })
+    terminal.jsonMode = true
+    try {
+        await fn()
+    } finally {
+        terminal.jsonMode = false
+        spy.mockRestore()
+    }
+    const output = written.join("")
+    expect(written).toEqual([output])
+    expect(output.endsWith("\n")).toBe(true)
+    return JSON.parse(output) as T
 }
 
 // Capture terminal.warn output for the duration of `fn`, then restore it.
@@ -39,6 +64,10 @@ describe("add command", () => {
     })
 
     afterEach(async () => {
+        // jsonMode is global state on the shared terminal export; reset it
+        // defensively so a leak never silences terminal.log in other suites.
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -248,5 +277,39 @@ describe("add command", () => {
             process.chdir(tmp)
             await fsp.rm(orphan, { recursive: true, force: true })
         }
+    })
+
+    it("emits { added, skipped } under --json: names added, URLs already present skipped", async () => {
+        await add.run({ repositories: ["https://github.com/acme/api.git"] })
+        const json = await captureJson<{ added: string[]; skipped: string[] }>(
+            async () => {
+                await add.run({
+                    repositories: [
+                        "https://github.com/acme/api.git",
+                        "https://github.com/acme/web.git"
+                    ]
+                })
+            }
+        )
+        // api was already registered (skipped, by URL); web is freshly added
+        // (by flat name, the same token the human summary lists).
+        expect(json).toEqual({
+            added: ["web"],
+            skipped: ["https://github.com/acme/api.git"]
+        })
+    })
+
+    it("emits empty skipped under --json when every repo is new", async () => {
+        const json = await captureJson<{ added: string[]; skipped: string[] }>(
+            async () => {
+                await add.run({
+                    repositories: [
+                        "git@github.com:acme/api.git",
+                        "https://github.com/acme/web.git"
+                    ]
+                })
+            }
+        )
+        expect(json).toEqual({ added: ["api", "web"], skipped: [] })
     })
 })

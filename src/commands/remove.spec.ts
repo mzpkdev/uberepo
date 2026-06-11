@@ -2,11 +2,36 @@ import * as fsp from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
 import { terminal } from "cmdore"
+import { vi } from "vitest"
 import remove from "@/commands/remove"
 import { CONFIG_FILENAME } from "@/config"
 
 const readConfig = async (file: string): Promise<unknown> => {
     return JSON.parse(await fsp.readFile(file, "utf8"))
+}
+
+// Run `fn` with jsonMode enabled, returning the single parsed JSON object the
+// command wrote to stdout. Resets jsonMode in finally before any assertion can
+// throw, so a failing expect() never leaks jsonMode into sibling suites.
+const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
+    const written: string[] = []
+    const spy = vi
+        .spyOn(process.stdout, "write")
+        .mockImplementation((chunk: string | Uint8Array): boolean => {
+            written.push(chunk.toString())
+            return true
+        })
+    terminal.jsonMode = true
+    try {
+        await fn()
+    } finally {
+        terminal.jsonMode = false
+        spy.mockRestore()
+    }
+    const output = written.join("")
+    expect(written).toEqual([output])
+    expect(output.endsWith("\n")).toBe(true)
+    return JSON.parse(output) as T
 }
 
 // Write a config file from a list of repositories, matching disk formatting.
@@ -47,6 +72,8 @@ describe("remove command", () => {
     })
 
     afterEach(async () => {
+        terminal.jsonMode = false
+        vi.restoreAllMocks()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -139,5 +166,27 @@ describe("remove command", () => {
                 "https://github.com/acme/c.git"
             ]
         })
+    })
+
+    it("emits { removed:[key], notFound:[] } under --json when an entry is removed", async () => {
+        await writeConfig(configPath, ["https://github.com/acme/api.git"])
+        const json = await captureJson<{
+            removed: string[]
+            notFound: string[]
+        }>(async () => {
+            await remove.run({ repository: "https://github.com/acme/api.git" })
+        })
+        // Keyed by the normalized key (host/slug, lowercased, no .git).
+        expect(json).toEqual({ removed: ["github.com/acme/api"], notFound: [] })
+    })
+
+    it("emits { removed:[], notFound:[key] } under --json when the repo is absent", async () => {
+        const json = await captureJson<{
+            removed: string[]
+            notFound: string[]
+        }>(async () => {
+            await remove.run({ repository: "https://github.com/acme/api.git" })
+        })
+        expect(json).toEqual({ removed: [], notFound: ["github.com/acme/api"] })
     })
 })

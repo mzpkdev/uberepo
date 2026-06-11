@@ -16,13 +16,13 @@ export default defineCommand({
         )
         const toAdd: string[] = []
         const names: string[] = []
-        let skipped = 0
+        const skipped: string[] = []
         for (const { url, key, name } of normalized) {
             if (seen.has(key)) {
                 terminal.warn(
                     `${url} is already in ${CONFIG_FILENAME} — skipping.`
                 )
-                skipped += 1
+                skipped.push(url)
                 continue
             }
             seen.add(key)
@@ -36,7 +36,14 @@ export default defineCommand({
                 }
             })
         }
+        // JSON mirrors the outcome: the flat names actually added, and the URLs
+        // that were already registered and thus skipped (the warn lines above).
+        terminal.json({ added: names, skipped })
         const summary = `Added ${toAdd.length} to ${CONFIG_FILENAME}: ${names.join(", ")}`
-        terminal.log(skipped > 0 ? `${summary} (${skipped} skipped)` : summary)
+        terminal.log(
+            skipped.length > 0
+                ? `${summary} (${skipped.length} skipped)`
+                : summary
+        )
     }
 })

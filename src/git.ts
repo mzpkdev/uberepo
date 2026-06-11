@@ -32,6 +32,19 @@ export class GitError extends Error {
         )
         this.name = "GitError"
     }
+
+    // True when this is a push that the remote rejected because the local branch
+    // is not a fast-forward of the remote tip (someone else pushed, or a local
+    // rebase diverged the branch). git prints "! [rejected]" with either
+    // "(non-fast-forward)" or "(fetch first)" to stderr in that case. ship reads
+    // this to turn a plain-push rejection into the "did you sync? --force" hint
+    // rather than a raw GitError.
+    isNonFastForward(): boolean {
+        return (
+            /\[rejected\]/.test(this.stderr) &&
+            /(non-fast-forward|fetch first|stale info)/.test(this.stderr)
+        )
+    }
 }
 
 export class Repository {
@@ -152,6 +165,27 @@ export class Worktree {
 
     async rebase(onto: string): Promise<void> {
         await run(["rebase", onto], this.path)
+    }
+
+    // Push the worktree's current branch to `remote`, setting upstream (`-u`) so
+    // the local branch tracks it. The plain form refuses a non-fast-forward (the
+    // remote moved or a rebase diverged the branch); `force` upgrades to
+    // `--force-with-lease`, which overwrites only when the remote tip is still
+    // what we last saw — safe after a `sync`, but never the blind `--force`. The
+    // ref is pushed explicitly (refs/heads/<branch>) so the push is unambiguous
+    // regardless of any push.default config. A rejection surfaces as a GitError
+    // whose isNonFastForward() lets the caller offer the --force hint.
+    async push(
+        branch: string,
+        opts?: { remote?: string; force?: boolean }
+    ): Promise<void> {
+        const remote = opts?.remote ?? "origin"
+        const args = ["push"]
+        if (opts?.force) {
+            args.push("--force-with-lease")
+        }
+        args.push("-u", remote, `refs/heads/${branch}:refs/heads/${branch}`)
+        await run(args, this.path)
     }
 
     // True when the worktree has uncommitted changes (staged, unstaged, or

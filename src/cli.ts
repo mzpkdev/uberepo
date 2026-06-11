@@ -7,6 +7,7 @@ import open from "@/commands/open"
 import prune from "@/commands/prune"
 import pull from "@/commands/pull"
 import remove from "@/commands/remove"
+import ship from "@/commands/ship"
 import sources from "@/commands/sources"
 import status from "@/commands/status"
 import sync from "@/commands/sync"
@@ -20,6 +21,7 @@ execute([
     prune,
     pull,
     remove,
+    ship,
     sources,
     status,
     sync

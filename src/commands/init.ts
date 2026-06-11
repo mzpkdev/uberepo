@@ -85,6 +85,16 @@ const stampTemplate = async (
     return written
 }
 
+// The JSON outcome of a successful init: the workspace directory, whether it
+// was freshly created (always true on the success path — Config.create throws
+// if uberepo.json already exists, so reaching here means a new workspace), and
+// whether the agent files were seeded (false under --no-agents).
+type InitJson = {
+    workspace: string
+    created: boolean
+    agents: boolean
+}
+
 // Stamp the workspace files into a freshly-created workspace and report which
 // manifest + files ended up written. .gitignore always lands (it keeps a
 // committed workspace clean); --no-agents holds back AGENTS.md/CLAUDE.md and the
@@ -95,6 +105,9 @@ const finish = async (dir: string, agents: boolean): Promise<void> => {
     // additionally holds back the agent files.
     const skip = agents ? COMMAND_SEEDS : [...COMMAND_SEEDS, ...AGENT_PATHS]
     const written = [CONFIG_FILENAME, ...(await stampTemplate(dir, skip))]
+    // JSON mirrors the structural outcome; the human line lists the files.
+    const json: InitJson = { workspace: dir, created: true, agents }
+    terminal.json(json)
     terminal.log(`Initialized uberepo in ${dir} — wrote ${written.join(", ")}`)
 }
 
