@@ -1,0 +1,202 @@
+import * as fs from "node:fs"
+import * as path from "node:path"
+import { repositoryUrl, type UberepoConfig } from "@/config"
+import git from "@/git"
+import { partitionScope, taskBranch, taskScope, worktreePath } from "@/tasks"
+import { normalizeRepository } from "@/url"
+
+// A task's per-repo footprint — the read-only computation diff and context
+// share. Read-only by design: no fetch, no hooks, no carry. The comparison
+// runs against the last-fetched upstream state, exactly as the refs stand on
+// disk, and one repo's failure becomes a skip with a reason, never an abort.
+
+// One commit a task branch carries beyond the comparison base: full sha plus
+// subject line, newest first (plain `git log` order).
+export type FootprintCommit = {
+    sha: string
+    subject: string
+}
+
+// One repo's slice of the task's footprint, the "ok" arm: the commits ahead
+// of the merge-base with the comparison base, the diffstat over that same
+// range, and whether the worktree holds uncommitted changes (which are NOT in
+// the diff).
+export type FootprintOk = {
+    name: string
+    branch: string
+    ahead: number
+    dirty: boolean
+    files: number
+    insertions: number
+    deletions: number
+    commits: FootprintCommit[]
+    status: "ok"
+}
+
+// The "skipped" arm: nothing to compare, with `reason` mirroring the human
+// line — no worktree for the task, a vanished task branch, or an unresolvable
+// origin default.
+export type FootprintSkipped = {
+    name: string
+    branch: string
+    status: "skipped"
+    reason: string
+}
+
+export type FootprintRepo = FootprintOk | FootprintSkipped
+
+// The whole footprint: the comparison base that named the run (each repo
+// resolves its own origin default — by convention the same ref name across
+// repos — and the first resolved wins; "" until then), the per-repo entries in
+// stable sorted order, and the stray worktrees outside a non-empty scope (the
+// caller warns about those — they are reported nowhere else).
+export type TaskFootprint = {
+    base: string
+    repos: FootprintRepo[]
+    strays: string[]
+}
+
+// Compute a task's footprint across its repos. Honours the task's declared
+// scope the way sync does: only its owned repos are reported, and a stray
+// worktree outside a non-empty scope comes back in `strays`. Unlike sync, a
+// scoped repo MISSING its worktree still gets an entry — the footprint should
+// say "nothing here", not hide the repo. `repos` is empty exactly when the
+// task is not open (no worktrees and no declared scope).
+export const taskFootprint = async (
+    config: UberepoConfig,
+    root: string,
+    task: string
+): Promise<TaskFootprint> => {
+    const branch = taskBranch(task)
+
+    // The repos that can actually be reported: registered AND cloned
+    // (source/<name> exists) AND holding this task's worktree, in stable
+    // sorted order (matches status/ship).
+    const present: string[] = []
+    for (const entry of config.repositories) {
+        const { name } = normalizeRepository(repositoryUrl(entry))
+        const source = path.join(root, "source", name)
+        const dest = worktreePath(root, task, name)
+        if (fs.existsSync(source) && fs.existsSync(dest)) {
+            present.push(name)
+        }
+    }
+    present.sort()
+
+    const scope = await taskScope(root, task)
+    const { inScope, strays } = partitionScope(present, scope)
+    const missing = scope.filter((name) => !present.includes(name))
+    const targets = [...new Set([...inScope, ...missing])].sort()
+
+    let base = ""
+    const repos: FootprintRepo[] = []
+    for (const name of targets) {
+        const source = path.join(root, "source", name)
+        const dest = worktreePath(root, task, name)
+        if (!present.includes(name)) {
+            repos.push({
+                name,
+                branch,
+                status: "skipped",
+                reason: "no worktree"
+            })
+            continue
+        }
+        const repo = git(source)
+
+        // The comparison base is the same ref sync rebases onto by default:
+        // origin's default branch, resolved from the local origin/HEAD symref
+        // (e.g. origin/main).
+        const resolved = await repo.remoteDefault()
+        if (!resolved) {
+            repos.push({
+                name,
+                branch,
+                status: "skipped",
+                reason: "cannot resolve origin's default branch"
+            })
+            continue
+        }
+        if (base === "") {
+            base = resolved
+        }
+
+        // The task branch can vanish while its worktree dir lingers (a
+        // detached worktree whose branch was deleted) — report, never crash
+        // the cross-repo run.
+        if (!(await repo.branchExists(branch))) {
+            repos.push({
+                name,
+                branch,
+                status: "skipped",
+                reason: "branch missing"
+            })
+            continue
+        }
+
+        const dirty = await repo.worktree(dest).dirty()
+        try {
+            const commits = await aheadCommits(repo, resolved, branch)
+            const stat = await diffstat(repo, resolved, branch)
+            repos.push({
+                name,
+                branch,
+                ahead: commits.length,
+                dirty,
+                files: stat.files,
+                insertions: stat.insertions,
+                deletions: stat.deletions,
+                commits,
+                status: "ok"
+            })
+        } catch (error) {
+            // Safety net for the odd unreadable repo (e.g. unrelated
+            // histories — no merge base): one repo's failure becomes a skip,
+            // never an abort of the whole report.
+            repos.push({
+                name,
+                branch,
+                status: "skipped",
+                reason: error instanceof Error ? error.message : String(error)
+            })
+        }
+    }
+
+    return { base, repos, strays }
+}
+
+// The commits on `branch` not reachable from `base` (`git log base..branch`,
+// i.e. everything past the merge-base), newest first. %x00 separates sha from
+// subject so the split is unambiguous — a subject can contain neither NUL nor
+// a newline.
+const aheadCommits = async (
+    repo: ReturnType<typeof git>,
+    base: string,
+    branch: string
+): Promise<FootprintCommit[]> => {
+    const out = await repo.raw("log", "--format=%H%x00%s", `${base}..${branch}`)
+    if (out === "") {
+        return []
+    }
+    return out.split("\n").map((line) => {
+        const [sha, subject] = line.split("\u0000")
+        return { sha: sha ?? "", subject: subject ?? "" }
+    })
+}
+
+// The diffstat over the same range the ahead-commits cover: merge-base(base,
+// branch) → branch, via the three-dot form (`git diff --shortstat
+// base...branch`). git prints "N files changed, N insertions(+), N
+// deletions(-)", dropping any zero part entirely (and the whole line for an
+// empty range), so each number is parsed independently and defaults to 0.
+const diffstat = async (
+    repo: ReturnType<typeof git>,
+    base: string,
+    branch: string
+): Promise<{ files: number; insertions: number; deletions: number }> => {
+    const out = await repo.raw("diff", "--shortstat", `${base}...${branch}`)
+    const files = Number(/(\d+) files? changed/.exec(out)?.[1] ?? "0")
+    const insertions = Number(/(\d+) insertions?\(\+\)/.exec(out)?.[1] ?? "0")
+    const deletions = Number(/(\d+) deletions?\(-\)/.exec(out)?.[1] ?? "0")
+    return { files, insertions, deletions }
+}

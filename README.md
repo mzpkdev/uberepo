@@ -91,6 +91,7 @@ uberepo close big-rename
 
 überepo doesn't just tolerate coding agents — it's built for them.
 - **Tasks carry handoff notes.** Every task gets `tasks/<task>/ubertask.yml` — goal, scope, tickets, decisions, blockers; one session writes it, the next (or you, on Monday morning) reads it and knows where things stand.
+- **One command rehydrates a session.** `uberepo context <task>` replays the whole handoff — the note, each repo's commits-ahead and diffstat, each branch's PR state — as a paste-ready markdown brief, or `--json` for the agent.
 - **Runs are idempotent and resumable.** `open`, `clone`, and `ship` skip what's already done — an agent can re-run after a crash and not make a mess.
 - **It ships its own playbook.** `uberepo init` stamps a `using-uberepo` skill into the workspace, so agents know the lifecycle without you explaining it. (`--no-agents` skips it.)
 - **Every command speaks JSON.** Add `--json` to anything and get structured output instead of pretty text — `uberepo status --json`:
@@ -135,6 +136,7 @@ decisions:
 | `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`; repos scoped via `--repos` clone on demand. |
 | `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
 | `uberepo diff <task>` | Show the task's footprint: commits ahead + diffstat per repo. |
+| `uberepo context <task>` | Everything to resume a task — note, per-repo state, PR state — as a paste-ready markdown brief. |
 | `uberepo sync <task>` | Rebase the task's worktrees onto fresh upstreams. `--check` forecasts the conflicts without rebasing. |
 | `uberepo ship <task>` | Push every branch and open a draft PR per repo (needs `gh`). |
 | `uberepo close <task>` | Remove the worktrees and delete the task branch. |

@@ -28,6 +28,7 @@ Re-read state before you report on it; don't scrape human-formatted text.
 | `uberepo sources --json` | Registered repos + whether each is cloned. |
 | `uberepo status --json` | Open tasks; each worktree's branch + clean/dirty. |
 | `uberepo diff <task> --json` | The task's footprint per repo: commits ahead of the origin default + diffstat. |
+| `uberepo context <task> --json` | Everything to resume the task: the note + diff's per-repo footprint + PR state per branch. |
 
 Drop `--json` for a human-readable table. If `uberepo` isn't on `PATH`, it's
 being run from source — check the workspace `README`.
@@ -48,6 +49,20 @@ vanished task branch is reported as `skipped` with a reason, never an error,
 and no hooks fire (it's not a lifecycle op). A `dirty` flag marks a worktree
 with uncommitted changes — **those changes are NOT in the numbers**; commit
 them to see them counted.
+
+### `uberepo context <task>` — the resume-a-task handoff
+
+One read-only blob of everything a fresh session needs to pick the task up:
+the parsed note (goal / tickets / decisions / blockers + freshness), `diff`'s
+per-repo footprint (branch, commits ahead, diffstat, dirty), and each branch's
+PR state. Human mode prints a small **markdown document** — built to be piped
+or pasted (Slack handoff, PR cover) — with empty sections omitted; `--json` is
+the same data structured. PR state comes from `gh pr view`, run in each repo's
+worktree: no `gh` on PATH → every PR field is silently omitted (no flag — the
+degradation is automatic); a branch without a PR shows `no PR` (JSON: `pr`
+absent); any `gh` error reads as no-PR, never an abort. Like `diff`: nothing
+is fetched, no hooks fire, and a repo that can't be read is `skipped` with a
+reason.
 
 ## Task lifecycle
 
@@ -342,6 +357,7 @@ Optional keys (`reason`, `error`, `note`) are omitted when they don't apply.
 | `pull` | `{ repos: [{ name, status: "updated" \| "current" \| "skipped", reason? }] }` — `reason`: `"not cloned"`, `"uncommitted changes"`, `"can't fast-forward"` |
 | `status` | `[{ name, repos: [{ name, branch?, dirty }], note? }]` |
 | `diff` | `{ task, base, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
+| `context` | `{ task, base, note?, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], pr?: { number, url, draft, state }, status: "ok" \| "skipped", reason? }] }` — `diff`'s footprint per repo (same fields, same skip reasons) plus `pr` when `gh` knows a PR for the branch (`draft` bool; `state`: gh's `OPEN`/`CLOSED`/`MERGED`); `pr` absent when the branch has no PR or `gh` is missing/failed (automatic degradation, never an error); `note` is the full task note (see below), omitted when the task has none |
 | `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], clone: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`, `"pre-clone hook failed"`, `"clone failed"`, `"not registered"`; `clone` has one entry per scoped repo cloned on demand this run (same entry shape as `clone`'s repos; a `failed` entry means that repo got no worktree, the run continued, and the exit code is non-zero); `hooks` lists every hook that ran (pre and post, the clone events included); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
 | `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
 | `sync --check` | `{ task, onto, check: true, repos: [{ name, status: "clean" \| "conflicts" \| "current" \| "dirty" \| "skipped", files?, reason? }] }` — a forecast: nothing was rebased, no hooks/carry keys; `files` (string[]) lists the likely-conflicted paths when merge-tree hit conflicts (also present on a `dirty` repo whose committed tips would conflict); `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"`, or the per-repo error; exits 0 even when conflicts are forecast |

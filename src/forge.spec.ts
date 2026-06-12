@@ -7,6 +7,7 @@ import {
     ghAvailable,
     prCreate,
     prList,
+    prView,
     pullRequestNumber,
     readPrTemplate
 } from "@/forge"
@@ -89,6 +90,48 @@ describe("forge: gh wrappers", () => {
             cwd: "/wt/api"
         })
         expect(url).toBe("https://github.com/acme/api/pull/12")
+    })
+
+    it("prView passes the exact argv and parses the JSON object", async () => {
+        const { run, calls } = fakeGh([
+            JSON.stringify({
+                number: 12,
+                url: "https://github.com/acme/api/pull/12",
+                isDraft: true,
+                state: "OPEN"
+            })
+        ])
+        const pr = await prView(run, "/wt/api", "task/alpha")
+        expect(calls).toEqual([
+            {
+                args: [
+                    "pr",
+                    "view",
+                    "task/alpha",
+                    "--json",
+                    "number,url,isDraft,state"
+                ],
+                cwd: "/wt/api"
+            }
+        ])
+        expect(pr).toEqual({
+            number: 12,
+            url: "https://github.com/acme/api/pull/12",
+            isDraft: true,
+            state: "OPEN"
+        })
+    })
+
+    it("prView swallows a gh failure (no PR, no auth, no gh) as undefined", async () => {
+        const failing: Gh = async (args) => {
+            throw new GhError(args, 1, "no pull requests found for branch")
+        }
+        expect(await prView(failing, "/wt/api", "task/alpha")).toBeUndefined()
+        // Empty / garbled stdout degrades the same way — never a throw.
+        const { run } = fakeGh([""])
+        expect(await prView(run, "/wt/api", "task/alpha")).toBeUndefined()
+        const { run: garbled } = fakeGh(["not json"])
+        expect(await prView(garbled, "/wt/api", "task/alpha")).toBeUndefined()
     })
 
     it("ghAvailable is true when the runner succeeds, false when it throws", async () => {

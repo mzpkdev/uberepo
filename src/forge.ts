@@ -134,6 +134,41 @@ export const prCreate = async (
     return out.trim()
 }
 
+// One PR as gh reports it from `pr view <branch> --json number,url,isDraft,
+// state`. state is gh's enum: OPEN / CLOSED / MERGED.
+export type PullRequestView = {
+    number: number
+    url: string
+    isDraft: boolean
+    state: string
+}
+
+// The PR for `branch` in the repo gh infers from `cwd`, or undefined when the
+// branch has no PR — OR when gh failed in any way (not authed, not a GitHub
+// repo, garbled output). Deliberately swallow-all: this feeds read-only
+// surfaces (context) where PR state is opportunistic enrichment, so a gh
+// hiccup degrades to "no PR known" rather than aborting the report. Callers
+// that must distinguish failure from absence (ship) use prList instead.
+export const prView = async (
+    run: Gh,
+    cwd: string,
+    branch: string
+): Promise<PullRequestView | undefined> => {
+    try {
+        const out = await run(
+            ["pr", "view", branch, "--json", "number,url,isDraft,state"],
+            cwd
+        )
+        const trimmed = out.trim()
+        if (trimmed === "") {
+            return undefined
+        }
+        return JSON.parse(trimmed) as PullRequestView
+    } catch {
+        return undefined
+    }
+}
+
 // The PR number parsed from a GitHub PR URL
 // (https://github.com/<owner>/<repo>/pull/<n>) — `gh pr create` prints the URL,
 // and the JSON outcome reports the number. Returns undefined for a non-matching

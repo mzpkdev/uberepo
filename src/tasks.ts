@@ -50,6 +50,27 @@ export type Task = {
     note?: TaskNote
 }
 
+// A coarse, human relative age for an epoch-ms timestamp: "just now", "5m ago",
+// "2h ago", "3d ago". Coarse on purpose — the note's freshness is a hint about
+// staleness, not a precise clock; finer units would just be noise. Lives next
+// to TaskNote.mtime, the timestamp it formats (status and context both use it).
+export const age = (mtime: number): string => {
+    const seconds = Math.max(0, Math.round((Date.now() - mtime) / 1000))
+    if (seconds < 60) {
+        return "just now"
+    }
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) {
+        return `${minutes}m ago`
+    }
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) {
+        return `${hours}h ago`
+    }
+    const days = Math.floor(hours / 24)
+    return `${days}d ago`
+}
+
 // A task's declared scope: the flat source/<name> repos it OWNS, read from its
 // ubertask.yml `repos:`. [] means unscoped — commands fan out to every cloned
 // repo with a worktree, the original behaviour. A missing/parseless note is
@@ -159,7 +180,8 @@ export const openTasks = async (options?: {
 // contents (the standing `why`) plus its mtime for freshness. Parsing is
 // tolerant — a partial / hand-edited note yields its best interpretation rather
 // than throwing, so a malformed note never breaks a read-only `status`.
-const readNote = async (
+// Exported so `context` emits the exact same TaskNote object status/open do.
+export const readNote = async (
     root: string,
     task: string
 ): Promise<TaskNote | undefined> => {

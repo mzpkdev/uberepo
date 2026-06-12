@@ -1,5 +1,5 @@
 import { defineArgument, defineCommand, terminal } from "cmdore"
-import { openTasks, type Task, UBERTASK_FILENAME } from "@/tasks"
+import { age, openTasks, type Task, UBERTASK_FILENAME } from "@/tasks"
 
 const task = defineArgument({
     name: "task",
@@ -81,24 +81,4 @@ const GOAL_MAX = 72
 const truncate = (goal: string): string => {
     const line = goal.replace(/\s+/g, " ").trim()
     return line.length > GOAL_MAX ? `${line.slice(0, GOAL_MAX - 1)}…` : line
-}
-
-// A coarse, human relative age for an epoch-ms timestamp: "just now", "5m ago",
-// "2h ago", "3d ago". Coarse on purpose — the note's freshness is a hint about
-// staleness, not a precise clock; finer units would just be noise.
-const age = (mtime: number): string => {
-    const seconds = Math.max(0, Math.round((Date.now() - mtime) / 1000))
-    if (seconds < 60) {
-        return "just now"
-    }
-    const minutes = Math.floor(seconds / 60)
-    if (minutes < 60) {
-        return `${minutes}m ago`
-    }
-    const hours = Math.floor(minutes / 60)
-    if (hours < 24) {
-        return `${hours}h ago`
-    }
-    const days = Math.floor(hours / 24)
-    return `${days}d ago`
 }
