@@ -1,18 +1,11 @@
-<p align="center">
-  <img src=".github/assets/banner.svg" alt="überepo — switch tasks, not branches" width="100%">
-</p>
-
-<p align="center">
-  A multi-repo workspace where one task owns one branch in <i>every</i> repo —<br>
-  and every command speaks JSON, so your coding agent can drive it too.
-</p>
+<p align="center"><img src=".github/assets/banner.svg" alt="überepo — switch tasks, not branches" width="100%"></p>
+<p align="center">A multi-repo workspace where one task owns one branch in <i>every</i> repo —<br>and every command speaks JSON, so your coding agent can drive it too.</p>
 
 ---
 
 ## The problem with five repos
 
-Marketing rebranded. "Acme" is now "Akko" — new logo, new name, same Tuesday. The old name lives in the web app, the API's email templates, the shared types, and two services that stamp it on invoices and notifications. One rename. Five repos. So you start the dance:
-
+Marketing rebranded. "Acme" is now "Akko" — new logo, new name, same Tuesday. The old name lives in five repos. So you start the dance:
 ```text
 cd api      && git checkout -b big-rename
 cd ../web   && git checkout -b big-rename
@@ -20,9 +13,7 @@ cd ../types && git checkout -b big-rename
 cd ../svc-a && git checkout -b big-rename
 cd ../svc-b && git checkout -b big-rename
 ```
-
-Then a "quick fix" lands on `main` and you do the whole thing again in reverse, stashing as you go.  
-Which repo am I on? Did I push `types`? One stray `git checkout` and you're committing to `main` like an animal.
+Then a "quick fix" lands on `main` and you do the whole dance again in reverse, stashing as you go. One stray `git checkout` and you're committing to `main` like an animal.
 
 Here's the mismatch: **a branch is a per-repo idea. Your task isn't.**  
 Your task is "ship the rebrand" — it doesn't care that it happens to touch five repositories.
@@ -30,17 +21,11 @@ Your task is "ship the rebrand" — it doesn't care that it happens to touch fiv
 ## So überepo flips it
 
 One task = one branch in **every** repo, each in its own git worktree:
-
 ```bash
 uberepo open big-rename
 ```
-
 That's the five checkouts. One command.  
-Every repo gets a `task/big-rename` branch living in its own directory under `tasks/big-rename/`.  
-You switch tasks by changing folders — not by checkout-dancing across repos. Your `main` checkout never moves, because worktrees don't stomp on each other.
-
-On disk, a task is just a folder:
-
+Every repo gets a `task/big-rename` worktree under `tasks/big-rename/`; you switch tasks by changing folders, and your `main` checkout never moves. On disk:
 ```text
 my-workspace/
 ├── uberepo.json                    # the manifest: which repos, which hooks
@@ -53,58 +38,44 @@ my-workspace/
         ├── api/                    # ...and a worktree per repo, on task/big-rename
         └── web/
 ```
-
-Tasks are first-class. Repos are just the participants.
+**Tasks are first-class. Repos are just the participants.**
 
 ## Why not a monorepo?
 
-Sometimes you can't have one — separate ownership, separate CI, separate deploy cadences, an open-source upstream you don't control.  
-Submodules and meta-repos bolt the repos together, but you're still branch-dancing inside each one.  
-überepo doesn't ask you to move anything: the repos you're stuck with stay where they are, each keeping its own conventions and its own PR flow.
+Sometimes you can't merge the repos — separate owners, separate CI, separate deploy cadences — so überepo works with the ones you're stuck with, each keeping its own conventions and PR flow.
 
-If you *can* merge everything into a monorepo, do that. überepo is for when you can't.
+**If you *can* merge everything into a monorepo, do that. überepo is for when you can't.**
+## Why not just tell your agent to "use worktrees"?
 
+For one repo, one session — sure, do that. Across five repos your agent *improvises*: some branch name, some layout, different every session, different per agent. The convention lives in a prompt, and prompts evaporate.
+
+**überepo is "use worktrees", written down once** — same branch, same layout, same recovery, for every repo, every session, every agent.
 ## Quickstart
 
 ```bash
 npm install -g uberepo
 ```
-
 ```bash
 # ── once ──────────────────────────────────────────
-
 # 1. carve out a workspace
 uberepo init my-workspace && cd my-workspace
-
-# 2. tell it which repos play (list as many as you want)
-#    (the GitHub org is still acme — nobody ever renames the org)
+# 2. tell it which repos play (the GitHub org is still acme — nobody ever renames the org)
 uberepo add https://github.com/acme/api.git https://github.com/acme/web.git
-
 # 3. clone them all into source/
 uberepo clone
 
 # ── every task ────────────────────────────────────
-
 # 4. open a task — branch + worktree in every repo, in one shot
 uberepo open big-rename --goal "Acme → Akko. Every string, every logo, every invoice."
-
-# 5. do the work. überepo does NOT commit or push for you — edit and
-#    commit inside each worktree, following that repo's own conventions:
-#       tasks/big-rename/api/
-#       tasks/big-rename/web/
-
+# 5. do the work — commit inside each worktree; überepo never commits for you
 # 6. rebase the whole task onto fresh upstreams
 uberepo sync big-rename
-
 # 7. push every branch + open a draft PR per repo (needs the gh CLI)
 uberepo ship big-rename --title "Acme → Akko"
-
 # 8. once the PRs merge, tear it all down
 uberepo close big-rename
 ```
-
-The loop, end to end:
-
+**The loop, end to end:**
 ```text
   ╭──────╮      ╭──────╮      ╭──────╮      ╭───────╮
   │ open │ ───▶ │ sync │ ───▶ │ ship │ ───▶ │ close │
@@ -113,62 +84,34 @@ The loop, end to end:
                     ╰────────────╯
                   iterate until merged
 ```
-
 ## Built so your agent can drive it
 
 überepo doesn't just tolerate coding agents — it's built for them.
-
-**Every command speaks JSON.** Add `--json` to anything and get structured output instead of pretty text. No scraping terminal strings, no regex against human prose.
-
-```bash
-uberepo status --json
-```
-
+- **Tasks carry handoff notes.** Every task gets `tasks/<task>/ubertask.yml` — goal, scope, tickets, decisions, blockers; one session writes it, the next (or you, on Monday morning) reads it and knows where things stand.
+- **Runs are idempotent and resumable.** `open`, `clone`, and `ship` skip what's already done — an agent can re-run after a crash and not make a mess.
+- **It ships its own playbook.** `uberepo init` stamps a `using-uberepo` skill into the workspace, so agents know the lifecycle without you explaining it. (`--no-agents` skips it.)
+- **Every command speaks JSON.** Add `--json` to anything and get structured output instead of pretty text — `uberepo status --json`:
 ```json
-[
-  {
-    "name": "big-rename",
-    "repos": [
-      { "name": "api", "branch": "task/big-rename", "dirty": false },
-      { "name": "web", "branch": "task/big-rename", "dirty": true }
-    ],
-    "note": {
-      "goal": "Acme → Akko. Every string, every logo, every invoice.",
-      "repos": ["api", "web"],
-      "tickets": [],
-      "decisions": [],
-      "blockers": []
-    }
-  }
-]
+[{
+  "name": "big-rename",
+  "repos": [{ "name": "api", "branch": "task/big-rename", "dirty": false }],
+  "note": { "goal": "Acme → Akko. Every string, every logo, every invoice." }
+}]
 ```
-
-**Tasks carry handoff notes.** Every task gets a `tasks/<task>/ubertask.yml` — the durable context git can't show you: the goal, which repos are in scope, ticket links, decisions made, what's blocked. One agent session writes it; the next one — or you, on Monday morning — reads it and knows exactly where things stand.
-
+And the handoff note itself, `tasks/big-rename/ubertask.yml` — the "why"; git holds the "what":
 ```yaml
-# ubertask.yml — durable task note. The "why"; git holds the "what".
 goal: |
   Acme → Akko. Every string, every logo, every invoice.
-
 repos:
   - api
   - web
-
 tickets:
   - https://example.com/ACME-1234
-
 decisions:
   - note: |
       The database stays acme_prod. We are not renaming the database. Ever.
     repo: api
-
-blockers: []
 ```
-
-**Runs are idempotent and resumable.** `open`, `clone`, and `ship` skip what's already done and pick up where they left off. An agent can re-run a command after a crash and not make a mess.
-
-**It ships its own playbook.** `uberepo init` stamps a `using-uberepo` skill into the workspace so Claude Code and other agents know the entire lifecycle without you explaining it. (Pass `--no-agents` to skip that.)
-
 ## Commands
 
 **Set up the workspace**
@@ -194,14 +137,12 @@ blockers: []
 | `uberepo prune` | Remove merged-and-clean tasks. Previews by default; `--force` to commit. |
 
 Every command accepts `--json`. Commands that run hooks (`clone`, `open`, `sync`) accept `--no-hooks`.
-
 ## How it works
 
 No daemon. No database. No lock file. State lives in git (branches + worktrees), in `uberepo.json` (the manifest), and in `ubertask.yml` (the task note). überepo itself is a thin, opinionated layer over `git worktree`:
-
-- **Worktrees do the heavy lifting.** Each task branch is a real `git worktree` checkout. überepo lists open tasks by reading git's own worktree registry — delete a worktree directory and the task simply vanishes from `status`. Nothing to desync.
-- **Hooks handle the setup grind.** Wire `post-clone`, `post-open`, and `post-sync` commands into `uberepo.json` and überepo fires them per repo with `UBEREPO_TASK` and `UBEREPO_REPO_*` in the environment — `npm install`, copy a `.env`, whatever each repo needs to come alive.
-- **It never commits for you.** überepo moves branches and worktrees around. The commits and pushes are yours (or your agent's), following each repo's conventions. It's a coordinator, not a backseat driver.
+- **Worktrees do the heavy lifting.** Every task branch is a real `git worktree` checkout — überepo reads git's own registry, so there's nothing to desync.
+- **Hooks handle the setup grind.** Wire `post-clone` / `post-open` / `post-sync` into `uberepo.json`; überepo fires them per repo with `UBEREPO_TASK` and `UBEREPO_REPO_*` in the environment — `npm install`, a `.env`, whatever a repo needs to come alive.
+- **It never commits for you.** Branches and worktrees are überepo's job; the commits and pushes stay yours (or your agent's). A coordinator, not a backseat driver.
 
 ---
 
