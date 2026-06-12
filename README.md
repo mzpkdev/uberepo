@@ -125,14 +125,14 @@ decisions:
 | `uberepo add <repo>...` | Register one or more repository URLs. |
 | `uberepo remove <repo>` | Unregister a repository. |
 | `uberepo sources` | List registered repos and their clone status. |
-| `uberepo clone` | Clone every registered repo into `source/`. Idempotent. |
+| `uberepo clone` | Clone every registered repo into `source/` — or just `--repos <name>...`. Idempotent. |
 | `uberepo pull` | Fast-forward all source clones (skips dirty ones). |
 
 **Run a task**
 
 | Command | What it does |
 | --- | --- |
-| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`. |
+| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`; repos scoped via `--repos` clone on demand. |
 | `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
 | `uberepo diff <task>` | Show the task's footprint: commits ahead + diffstat per repo. |
 | `uberepo sync <task>` | Rebase the task's worktrees onto fresh upstreams. `--check` forecasts the conflicts without rebasing. |

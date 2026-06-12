@@ -2,39 +2,23 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { Config, repositoryUrl } from "@/config"
-import git from "@/git"
-import { type HookResult, runHook } from "@/hooks"
+import type { HookResult } from "@/hooks"
 import { noHooks } from "@/options/no-hooks"
+import { repos } from "@/options/repos"
+import { type CloneRepo, cloneSource } from "@/sources"
 import { normalizeRepository } from "@/url"
-
-// One repo's clone outcome: cloned (a fresh clone landed), skipped (source/<name>
-// already existed, or its pre-clone hook failed — `reason` set on the hook
-// path), or failed (git.clone threw — carries the error message). clone fails
-// fast on a git error, so at most one repo is ever `failed`, and it is the last
-// entry before the command rethrows.
-type CloneRepo = {
-    name: string
-    status: "cloned" | "skipped" | "failed"
-    reason?: string
-    error?: string
-}
 
 export default defineCommand({
     name: "clone",
     description: "Clone every registered repository into source/",
-    options: [noHooks],
+    options: [repos, noHooks],
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
 
-        if (config.repositories.length === 0) {
-            terminal.json({ repos: [], hooks: [] })
-            terminal.log("Nothing to clone — no repositories registered.")
-            return
-        }
-
         // Collision guard: fail loud BEFORE cloning anything if two distinct
-        // repositories map to the same flat source/<name> folder.
+        // repositories map to the same flat source/<name> folder. The map it
+        // builds doubles as the registered-name index --repos validates against.
         const seen = new Map<string, { url: string; key: string }>()
         for (const entry of config.repositories) {
             const url = repositoryUrl(entry)
@@ -48,6 +32,41 @@ export default defineCommand({
             seen.set(name, { url, key })
         }
 
+        // --repos clones only the named subset (flat names, the same names
+        // sources/status use). Validate BEFORE cloning anything: an unknown
+        // name fails loud with the registered set listed, so a typo never
+        // half-clones a workspace.
+        let subset: string[] | undefined
+        if (argv.repos !== undefined) {
+            subset = []
+            for (const name of argv.repos) {
+                if (!seen.has(name)) {
+                    const known =
+                        [...seen.keys()].join(", ") || "(none registered)"
+                    throw new Error(
+                        `${name} is not a registered repository — known: ${known}.`
+                    )
+                }
+                if (!subset.includes(name)) {
+                    subset.push(name)
+                }
+            }
+        }
+
+        if (config.repositories.length === 0) {
+            terminal.json({ repos: [], hooks: [] })
+            terminal.log("Nothing to clone — no repositories registered.")
+            return
+        }
+
+        // The repos this run clones: the --repos subset when given (kept in
+        // registration order, not flag order), else every registered repo.
+        const targets = config.repositories.filter(
+            (entry) =>
+                subset === undefined ||
+                subset.includes(normalizeRepository(repositoryUrl(entry)).name)
+        )
+
         let cloned = 0
         const repos: CloneRepo[] = []
         // One entry per hook that actually ran (pre-clone and post-clone, for
@@ -56,7 +75,7 @@ export default defineCommand({
         // without aborting the remaining clones.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
-        for (const entry of config.repositories) {
+        for (const entry of targets) {
             const url = repositoryUrl(entry)
             const { name } = normalizeRepository(url)
             const dest = path.join(root, "source", name)
@@ -65,60 +84,34 @@ export default defineCommand({
                 terminal.log(`Skipping ${url} — already at source/${name}`)
                 continue
             }
-            // pre-clone GATES the clone: a non-zero exit skips this repo
-            // (nothing is cloned), the run continues, and the command exits
-            // non-zero at the end. source/<name> does not exist yet, so the
-            // hook runs at the workspace root while UBEREPO_REPO_PATH names
-            // the would-be clone.
-            const pre = await runHook("pre-clone", {
+            // The per-repo lifecycle op (pre-clone gate → git clone →
+            // post-clone) lives in cloneSource, shared with open's on-demand
+            // clones. A failed pre-clone skips the repo and the run continues;
+            // hook exits are tallied for the end-of-run summary either way.
+            const outcome = await cloneSource({
                 config,
-                workspace: root,
-                cwd: root,
-                repo: { name, path: dest, url },
+                root,
+                name,
+                url,
                 noHooks: argv["no-hooks"]
             })
-            if (pre) {
-                hooks.push(pre)
-                if (pre.exit !== 0) {
-                    failedHooks.push(pre)
-                    repos.push({
-                        name,
-                        status: "skipped",
-                        reason: "pre-clone hook failed"
-                    })
-                    terminal.log(`Skipping ${url} — pre-clone hook failed`)
-                    continue
+            for (const hook of outcome.hooks) {
+                hooks.push(hook)
+                if (hook.exit !== 0) {
+                    failedHooks.push(hook)
                 }
             }
-            terminal.log(`Cloning ${url} → source/${name}`)
-            try {
-                await git.clone(url, dest)
-            } catch (error) {
-                // Fail fast (unchanged behaviour): record this repo as failed,
-                // emit the JSON so the outcome is observable, then rethrow so
-                // the human error path and exit code are exactly as before.
-                const reason =
-                    error instanceof Error ? error.message : String(error)
-                repos.push({ name, status: "failed", error: reason })
+            repos.push(outcome.repo)
+            if (outcome.repo.status === "failed") {
+                // Fail fast (unchanged behaviour): the repo is recorded as
+                // failed, the JSON is emitted so the outcome is observable,
+                // then the git error is rethrown so the human error path and
+                // exit code are exactly as before.
                 terminal.json({ repos, hooks })
-                throw error
+                throw outcome.error
             }
-            repos.push({ name, status: "cloned" })
-            cloned += 1
-            // post-clone fires for the FRESH clone only, with cwd = its
-            // source/<name> and no task/branch. A hook failure is recorded and
-            // the loop continues — the clone itself already landed.
-            const result = await runHook("post-clone", {
-                config,
-                workspace: root,
-                repo: { name, path: dest, url },
-                noHooks: argv["no-hooks"]
-            })
-            if (result) {
-                hooks.push(result)
-                if (result.exit !== 0) {
-                    failedHooks.push(result)
-                }
+            if (outcome.repo.status === "cloned") {
+                cloned += 1
             }
         }
 

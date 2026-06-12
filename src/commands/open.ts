@@ -10,6 +10,7 @@ import { from } from "@/options/from"
 import { goal } from "@/options/goal"
 import { noHooks } from "@/options/no-hooks"
 import { repos } from "@/options/repos"
+import { type CloneRepo, cloneSource } from "@/sources"
 import {
     type TaskNote,
     taskBranch,
@@ -20,8 +21,10 @@ import * as ubertask from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
 // One repo's open outcome: `created` (a fresh worktree landed) or `skipped`
-// (its worktree was already open — the idempotent/recovery path — or its
-// pre-open hook failed, with `reason` set on the hook path).
+// (its worktree was already open — the idempotent/recovery path — or no
+// worktree could be attempted, with `reason` set: a failed pre-open or
+// pre-clone hook, a failed on-demand clone, or a scope name that isn't
+// registered at all).
 type OpenRepo = {
     name: string
     status: "created" | "skipped"
@@ -54,36 +57,23 @@ export default defineCommand({
         // Omitting --from branches each worktree off its clone's current HEAD.
         const base = argv.from ?? "HEAD"
 
-        // Only cloned repos can grow a worktree; warn + skip the rest, the way
-        // status does, so a partially-cloned workspace still opens what it can.
-        // Remember each repo's registered URL so a fired hook can surface it as
-        // UBEREPO_REPO_URL (the loop below works in flat names).
+        // The registered flat names (registration order) with their URLs, and
+        // which of them are already cloned. Whether an uncloned repo is merely
+        // skipped or cloned on demand depends on the scope — computed below —
+        // so nothing is logged here yet. The URL map lets a fired hook surface
+        // UBEREPO_REPO_URL and feeds the on-demand clones (the loops below
+        // work in flat names).
+        const registered: string[] = []
         const cloned: string[] = []
         const urlByName = new Map<string, string>()
         for (const entry of config.repositories) {
             const url = repositoryUrl(entry)
             const { name } = normalizeRepository(url)
+            registered.push(name)
             urlByName.set(name, url)
             if (fs.existsSync(path.join(root, "source", name))) {
                 cloned.push(name)
-            } else {
-                terminal.log(`Skipping ${name} — not cloned (run clone first)`)
             }
-        }
-
-        if (cloned.length === 0) {
-            // No worktree is opened and no note is seeded on this path, so the
-            // JSON carries an empty scope/repos, no hooks or carry, and no
-            // note key.
-            terminal.json({
-                task: argv.task,
-                scope: [],
-                repos: [],
-                hooks: [],
-                carry: []
-            })
-            terminal.log("Nothing to open — no cloned repositories.")
-            return
         }
 
         // The task's durable note carries its declared scope; read it once up
@@ -95,16 +85,17 @@ export default defineCommand({
         const storedScope = existing?.repos ?? []
 
         // Validate --repos BEFORE creating anything: every supplied name must
-        // resolve to a registered AND cloned repo (its source/<name> exists).
-        // Mirror clone's pre-flight collision guard — fail loud and create
-        // nothing on the first bad name, so a typo never half-opens a task.
+        // be a registered repo. It need NOT be cloned — a registered-but-
+        // uncloned name is the on-demand clone path below. Mirror clone's
+        // pre-flight collision guard — fail loud and create nothing on the
+        // first unknown name, so a typo never half-opens a task.
         const suppliedScope: string[] = []
         if (argv.repos !== undefined) {
             for (const name of argv.repos) {
-                if (!cloned.includes(name)) {
-                    const known = cloned.join(", ") || "(none cloned)"
+                if (!registered.includes(name)) {
+                    const known = registered.join(", ") || "(none registered)"
                     throw new Error(
-                        `${name} is not a cloned repository — known: ${known}. Clone it (or fix the name) before scoping a task to it.`
+                        `${name} is not a registered repository — known: ${known}. Register it (or fix the name) before scoping a task to it.`
                     )
                 }
                 if (!suppliedScope.includes(name)) {
@@ -124,18 +115,53 @@ export default defineCommand({
             }
         }
         const scoped = scope.length > 0
-        // Worktree targets: the in-scope cloned repos (scope ∩ cloned, kept in
-        // cloned's stable order) when scoped, else all cloned repos.
+        // Worktree targets. Scoped: the in-scope REGISTERED repos (scope ∩
+        // registered, kept in registration order) — an in-scope repo that
+        // isn't cloned yet is cloned on demand in the loop below, because a
+        // scoped name is an explicit ask for exactly that repo. Unscoped:
+        // every cloned repo, exactly today's behaviour — an unscoped open
+        // NEVER clones implicitly.
         const targets = scoped
-            ? cloned.filter((n) => scope.includes(n))
-            : cloned
+            ? registered.filter((n) => scope.includes(n))
+            : [...cloned]
+
+        // Warn + skip the uncloned repos this run will NOT touch (registered
+        // but outside the targets), the way status does, so a partially-cloned
+        // workspace still opens what it can.
+        for (const name of registered) {
+            if (!cloned.includes(name) && !targets.includes(name)) {
+                terminal.log(`Skipping ${name} — not cloned (run clone first)`)
+            }
+        }
+
+        if (cloned.length === 0 && !scoped) {
+            // No worktree is opened and no note is seeded on this path, so the
+            // JSON carries an empty scope/repos, no clone, hooks, or carry,
+            // and no note key. A SCOPED open proceeds instead — its scope
+            // names what to clone on demand.
+            terminal.json({
+                task: argv.task,
+                scope: [],
+                repos: [],
+                clone: [],
+                hooks: [],
+                carry: []
+            })
+            terminal.log("Nothing to open — no cloned repositories.")
+            return
+        }
 
         let opened = 0
         const repos: OpenRepo[] = []
-        // One entry per hook that actually ran (pre-open and post-open, for
-        // worktrees this run actually tried to create — never an already-open
-        // skip). A non-zero exit is collected and flips the command's exit
-        // code at the end without aborting the rest.
+        // One entry per repo this run clone-attempted ON DEMAND (a scoped
+        // target with no source/<name> yet) — the same per-repo shape `clone`
+        // emits. Empty whenever no on-demand clone ran, unscoped runs included.
+        const clone: CloneRepo[] = []
+        // One entry per hook that actually ran (pre-/post-clone for on-demand
+        // clones, pre-open and post-open for worktrees this run actually tried
+        // to create — never an already-open skip). A non-zero exit is
+        // collected and flips the command's exit code at the end without
+        // aborting the rest.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
         // One entry per repo whose carry actually ran (a NEWLY-created worktree
@@ -143,9 +169,63 @@ export default defineCommand({
         // kept, or skipped as tracked. A skipped (already-open) worktree keeps
         // its files as-is — `sync` is the missing-files repair.
         const carry: CarryEntry[] = []
+        // A scope name that isn't registered at all can be neither opened nor
+        // cloned (there is no URL to clone from). A note may legitimately
+        // outlive a repo's registration, so this is a per-repo skip — warned
+        // and recorded, never an abort.
+        for (const name of scope) {
+            if (!registered.includes(name)) {
+                repos.push({
+                    name,
+                    status: "skipped",
+                    reason: "not registered"
+                })
+                terminal.warn(
+                    `${name}: in the task scope but not a registered repository — skipping; add it or remove it from the note's repos:`
+                )
+            }
+        }
         for (const name of targets) {
+            const source = path.join(root, "source", name)
             const dest = worktreePath(root, argv.task, name)
             const relative = path.join(TASKS_DIR, argv.task, name)
+            // On-demand clone: a scoped target with no clone yet is cloned
+            // FIRST, as the same per-repo lifecycle op `uberepo clone` runs
+            // (pre-clone gate → git clone → post-clone, identical hook cwd/env
+            // contract), then opened below like any cloned repo. Only a scoped
+            // open can get here — unscoped targets are always already cloned.
+            if (!fs.existsSync(source)) {
+                const outcome = await cloneSource({
+                    config,
+                    root,
+                    name,
+                    url: urlByName.get(name) ?? "",
+                    noHooks: argv["no-hooks"]
+                })
+                clone.push(outcome.repo)
+                for (const hook of outcome.hooks) {
+                    hooks.push(hook)
+                    if (hook.exit !== 0) {
+                        failedHooks.push(hook)
+                    }
+                }
+                if (outcome.repo.status !== "cloned") {
+                    // No clone landed (git failed, or the pre-clone gate
+                    // held), so there is no repo to open a worktree in: record
+                    // the skip and continue with the remaining repos — the
+                    // failure flips the exit code at the end, and a re-run
+                    // picks the repo up (per-repo resilience, like ship).
+                    repos.push({
+                        name,
+                        status: "skipped",
+                        reason:
+                            outcome.repo.status === "failed"
+                                ? "clone failed"
+                                : outcome.repo.reason
+                    })
+                    continue
+                }
+            }
             // Idempotent: an existing worktree dir is left untouched. This is
             // also the recovery path — re-running open skips the done repos
             // and resumes after a mid-run failure.
@@ -165,7 +245,7 @@ export default defineCommand({
                 config,
                 workspace: root,
                 task: argv.task,
-                cwd: path.join(root, "source", name),
+                cwd: source,
                 repo: {
                     name,
                     path: dest,
@@ -192,7 +272,7 @@ export default defineCommand({
             )
             // Fail-fast: a creation error propagates, stopping before any
             // later repo is touched; already-created worktrees stay put.
-            const repo = git(path.join(root, "source", name))
+            const repo = git(source)
             await repo.worktree(dest).create({ branch, from: base })
             repos.push({ name, status: "created" })
             opened += 1
@@ -202,7 +282,7 @@ export default defineCommand({
             const carried = await runCarry({
                 config,
                 name,
-                source: path.join(root, "source", name),
+                source,
                 worktree: dest
             })
             if (carried) {
@@ -289,6 +369,7 @@ export default defineCommand({
             task: argv.task,
             scope,
             repos,
+            clone,
             hooks,
             carry,
             // Omit the note key when absent, matching #2's omit-when-absent.
@@ -300,6 +381,20 @@ export default defineCommand({
                 opened === 1 ? "repository" : "repositories"
             }`
         )
+        // A failed on-demand clone left its repo without a worktree, but the
+        // others were still opened: summarise and exit non-zero, matching
+        // clone's convention that a clone failure is never a clean run. A
+        // re-run retries it — the repo stays in the scope.
+        const failedClones = clone.filter((c) => c.status === "failed")
+        if (failedClones.length > 0) {
+            const which = failedClones.map((c) => c.name).join(", ")
+            terminal.error(
+                `clone failed in ${failedClones.length} ${
+                    failedClones.length === 1 ? "repository" : "repositories"
+                }: ${which}`
+            )
+            process.exitCode = 1
+        }
         // A failing post-open never removes its worktree (and a failing
         // pre-open just left its repo unopened), but the run is not clean:
         // summarise and exit non-zero so a wrapper/CI sees the failure.

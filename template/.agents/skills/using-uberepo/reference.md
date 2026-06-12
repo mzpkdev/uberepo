@@ -63,6 +63,15 @@ cloned repo, off each clone's current HEAD.
   re-open, supplied names are unioned into the stored scope, never replacing it;
   omit `--repos` to leave the scope unchanged. No `--repos` ever = unscoped (every
   cloned repo).
+- **Scoped repos clone on demand.** A repo in the task's scope (named by
+  `--repos` now, or stored in the note's `repos:` on a re-open) that is
+  registered but not yet cloned is cloned into `source/<name>` first — its
+  `pre-clone`/`post-clone` hooks fire exactly as under `uberepo clone` — then
+  opened like any other repo. ONLY explicitly scoped repos do this; an
+  unscoped open never clones anything. A failed on-demand clone is reported
+  for that repo, the run continues with the rest, and the command exits
+  non-zero at the end (re-running retries it). A `--repos` name that isn't
+  registered at all is an error.
 - Idempotent: re-running skips repos already opened and picks up repos cloned
   since the first run.
 - If `uberepo.json` declares [carry](#carry--local-files-into-worktrees)
@@ -227,6 +236,10 @@ one (already cloned, already open, dirty, nothing to ship).
 | `pre-close` | a worktree's teardown | `tasks/<task>/<name>/` |
 | `post-close` | after worktree + branch are gone | `source/<name>/` (`UBEREPO_REPO_PATH` = the removed worktree) |
 
+The clone events fire wherever a clone actually happens — `uberepo clone`, or
+an `open` cloning a scoped repo on demand — always with the same cwd and the
+task-free env below.
+
 An unknown event key is a config error (listing the valid events). A manifest
 with no `hooks` key behaves exactly as before — hooks are entirely opt-in.
 
@@ -290,7 +303,7 @@ string), or both; a repo's effective set is the union of the two.
 | `uberepo init [name]` | Create a new workspace (manifest + agent files). |
 | `uberepo add <url>...` | Register one or more repos in one call. |
 | `uberepo remove <url>` | Unregister a repo. |
-| `uberepo clone` | Clone every registered repo into `source/<name>` (skips ones already cloned). |
+| `uberepo clone [--repos <name>...]` | Clone every registered repo into `source/<name>` (skips ones already cloned); `--repos` clones only the named ones (an unknown name is an error). |
 | `uberepo pull` | Fast-forward every cloned repo in `source/` to its origin (skips dirty or diverged repos). |
 
 - `add`/`remove` match repos by host/owner/repo identity, so any URL form works.
@@ -325,11 +338,11 @@ Optional keys (`reason`, `error`, `note`) are omitted when they don't apply.
 | `add` | `{ added: string[], skipped: string[] }` — `added` = flat names added; `skipped` = URLs already registered |
 | `remove` | `{ removed: string[], notFound: string[] }` — each the normalized host/owner/repo key |
 | `sources` | `[{ name, url, cloned }]` |
-| `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `reason` (skip): `"pre-clone hook failed"`; `hooks` lists every hook that ran (pre and post) |
+| `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `reason` (skip): `"pre-clone hook failed"`; `hooks` lists every hook that ran (pre and post); with `--repos <name>...` the same shape, just only the named repos |
 | `pull` | `{ repos: [{ name, status: "updated" \| "current" \| "skipped", reason? }] }` — `reason`: `"not cloned"`, `"uncommitted changes"`, `"can't fast-forward"` |
 | `status` | `[{ name, repos: [{ name, branch?, dirty }], note? }]` |
 | `diff` | `{ task, base, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
-| `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`; `hooks` lists every hook that ran (pre and post); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
+| `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], clone: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`, `"pre-clone hook failed"`, `"clone failed"`, `"not registered"`; `clone` has one entry per scoped repo cloned on demand this run (same entry shape as `clone`'s repos; a `failed` entry means that repo got no worktree, the run continued, and the exit code is non-zero); `hooks` lists every hook that ran (pre and post, the clone events included); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
 | `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
 | `sync --check` | `{ task, onto, check: true, repos: [{ name, status: "clean" \| "conflicts" \| "current" \| "dirty" \| "skipped", files?, reason? }] }` — a forecast: nothing was rebased, no hooks/carry keys; `files` (string[]) lists the likely-conflicted paths when merge-tree hit conflicts (also present on a `dirty` repo whose committed tips would conflict); `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"`, or the per-repo error; exits 0 even when conflicts are forecast |
 | `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |

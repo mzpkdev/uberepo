@@ -128,7 +128,7 @@ describe("clone command", () => {
         ])
         const { calls } = mockClone()
         await captureOutput(async () => {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         })
         expect(calls).toEqual([
             {
@@ -153,7 +153,7 @@ describe("clone command", () => {
         ])
         const { calls } = mockClone()
         await captureOutput(async () => {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         })
         expect(calls.map((c) => c.dest)).toEqual([
             path.join(root, "source", "api"),
@@ -169,7 +169,7 @@ describe("clone command", () => {
         await fsp.mkdir(path.join(tmp, "source", "api"), { recursive: true })
         const { calls } = mockClone()
         const { logs } = await captureOutput(async () => {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         })
         expect(calls).toEqual([
             {
@@ -190,7 +190,7 @@ describe("clone command", () => {
         const { calls } = mockClone()
         let error: unknown
         try {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         } catch (e) {
             error = e
         }
@@ -211,7 +211,7 @@ describe("clone command", () => {
         let error: unknown
         try {
             await captureOutput(async () => {
-                await clone.run({ "no-hooks": false })
+                await clone.run({ "no-hooks": false, repos: undefined })
             })
         } catch (e) {
             error = e
@@ -238,7 +238,7 @@ describe("clone command", () => {
         process.chdir(nested)
         const { calls } = mockClone()
         await captureOutput(async () => {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         })
         expect(calls).toEqual([
             {
@@ -251,7 +251,7 @@ describe("clone command", () => {
     it("logs a nothing-to-clone message and never calls git.clone for an empty config", async () => {
         const { calls } = mockClone()
         const { logs } = await captureOutput(async () => {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         })
         expect(calls).toHaveLength(0)
         expect(logs).toEqual(["Nothing to clone — no repositories registered."])
@@ -266,7 +266,7 @@ describe("clone command", () => {
         try {
             let error: unknown
             try {
-                await clone.run({ "no-hooks": false })
+                await clone.run({ "no-hooks": false, repos: undefined })
             } catch (e) {
                 error = e
             }
@@ -287,7 +287,7 @@ describe("clone command", () => {
     it("emits { repos:[] } under --json for an empty config", async () => {
         mockClone()
         const json = await captureJson<CloneJson>(async () => {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         })
         expect(json).toEqual({ repos: [], hooks: [] })
     })
@@ -301,7 +301,7 @@ describe("clone command", () => {
         await fsp.mkdir(path.join(tmp, "source", "api"), { recursive: true })
         mockClone()
         const json = await captureJson<CloneJson>(async () => {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         })
         expect(json).toEqual({
             repos: [
@@ -332,7 +332,7 @@ describe("clone command", () => {
         terminal.jsonMode = true
         let error: unknown
         try {
-            await clone.run({ "no-hooks": false })
+            await clone.run({ "no-hooks": false, repos: undefined })
         } catch (e) {
             error = e
         } finally {
@@ -353,6 +353,87 @@ describe("clone command", () => {
         ])
     })
 
+    describe("--repos (subset)", () => {
+        it("clones only the named repos, deduped, in registration order", async () => {
+            await writeConfig(configPath, [
+                "https://github.com/acme/a.git",
+                "https://github.com/acme/b.git",
+                "https://github.com/acme/c.git"
+            ])
+            const { calls } = mockClone()
+            const json = await captureJson<CloneJson>(async () => {
+                // Flag order (and the repeat) must not matter: targets follow
+                // the manifest's registration order, once each.
+                await clone.run({ "no-hooks": false, repos: ["c", "a", "c"] })
+            })
+            expect(calls).toEqual([
+                {
+                    url: "https://github.com/acme/a.git",
+                    dest: path.join(root, "source", "a")
+                },
+                {
+                    url: "https://github.com/acme/c.git",
+                    dest: path.join(root, "source", "c")
+                }
+            ])
+            // Same JSON shape as a full clone, just fewer entries — the
+            // unnamed repo is absent, not skipped.
+            expect(json).toEqual({
+                repos: [
+                    { name: "a", status: "cloned" },
+                    { name: "c", status: "cloned" }
+                ],
+                hooks: []
+            })
+        })
+
+        it("still skips a subset member already at source/<name>", async () => {
+            await writeConfig(configPath, [
+                "https://github.com/acme/api.git",
+                "https://github.com/acme/web.git"
+            ])
+            await fsp.mkdir(path.join(tmp, "source", "api"), {
+                recursive: true
+            })
+            const { calls } = mockClone()
+            const json = await captureJson<CloneJson>(async () => {
+                await clone.run({ "no-hooks": false, repos: ["api", "web"] })
+            })
+            expect(calls).toEqual([
+                {
+                    url: "https://github.com/acme/web.git",
+                    dest: path.join(root, "source", "web")
+                }
+            ])
+            expect(json.repos).toEqual([
+                { name: "api", status: "skipped" },
+                { name: "web", status: "cloned" }
+            ])
+        })
+
+        it("rejects an unknown name, listing the registered repos, and clones nothing", async () => {
+            await writeConfig(configPath, [
+                "https://github.com/acme/api.git",
+                "https://github.com/acme/web.git"
+            ])
+            const { calls } = mockClone()
+            let error: unknown
+            try {
+                await clone.run({ "no-hooks": false, repos: ["api", "ghost"] })
+            } catch (e) {
+                error = e
+            }
+            expect(error).toBeInstanceOf(Error)
+            const message = (error as Error).message
+            expect(message).toContain("ghost")
+            expect(message).toContain("not a registered repository")
+            // The error names the valid set, so a typo is self-correcting.
+            expect(message).toContain("api")
+            expect(message).toContain("web")
+            expect(calls).toHaveLength(0)
+        })
+    })
+
     describe("hooks", () => {
         it("fires post-clone ONLY for freshly cloned repos, not skipped ones", async () => {
             await writeConfigWithHooks(
@@ -369,7 +450,7 @@ describe("clone command", () => {
             })
             mockClone()
             await captureOutput(async () => {
-                await clone.run({ "no-hooks": false })
+                await clone.run({ "no-hooks": false, repos: undefined })
             })
             // The skipped repo never got the hook...
             await expect(
@@ -396,7 +477,7 @@ describe("clone command", () => {
             })
             mockClone()
             const json = await captureJson<CloneJson>(async () => {
-                await clone.run({ "no-hooks": false })
+                await clone.run({ "no-hooks": false, repos: undefined })
             })
             // api skipped → no hook entry; web cloned → one exit-0 entry.
             expect(json.hooks).toEqual([
@@ -412,7 +493,7 @@ describe("clone command", () => {
             )
             mockClone()
             const json = await captureJson<CloneJson>(async () => {
-                await clone.run({ "no-hooks": true })
+                await clone.run({ "no-hooks": true, repos: undefined })
             })
             expect(json.hooks).toEqual([])
             await expect(
@@ -439,7 +520,7 @@ describe("clone command", () => {
             let json: CloneJson
             try {
                 json = await captureJson<CloneJson>(async () => {
-                    await clone.run({ "no-hooks": false })
+                    await clone.run({ "no-hooks": false, repos: undefined })
                 })
                 // The failing hook flips the command's exit code...
                 expect(process.exitCode).toBe(1)
@@ -476,7 +557,7 @@ describe("clone command", () => {
             let json: CloneJson
             try {
                 json = await captureJson<CloneJson>(async () => {
-                    await clone.run({ "no-hooks": false })
+                    await clone.run({ "no-hooks": false, repos: undefined })
                 })
                 expect(process.exitCode).toBe(1)
             } finally {
@@ -498,7 +579,7 @@ describe("clone command", () => {
             // Fix the cause and re-run: the skipped repo is picked up.
             await fsp.rm(path.join(root, "block"))
             const rerun = await captureJson<CloneJson>(async () => {
-                await clone.run({ "no-hooks": false })
+                await clone.run({ "no-hooks": false, repos: undefined })
             })
             expect(rerun.repos).toEqual([{ name: "api", status: "cloned" }])
             expect(calls).toEqual([
@@ -520,7 +601,7 @@ describe("clone command", () => {
             )
             mockClone()
             await captureJson<CloneJson>(async () => {
-                await clone.run({ "no-hooks": false })
+                await clone.run({ "no-hooks": false, repos: undefined })
             })
             const line = (
                 await fsp.readFile(path.join(root, "pre.txt"), "utf8")
@@ -538,7 +619,7 @@ describe("clone command", () => {
             )
             mockClone()
             const json = await captureJson<CloneJson>(async () => {
-                await clone.run({ "no-hooks": true })
+                await clone.run({ "no-hooks": true, repos: undefined })
             })
             expect(json.repos).toEqual([{ name: "api", status: "cloned" }])
             expect(json.hooks).toEqual([])

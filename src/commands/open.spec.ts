@@ -8,6 +8,7 @@ import { terminal } from "cmdore"
 import { vi } from "vitest"
 import open from "@/commands/open"
 import { CONFIG_FILENAME } from "@/config"
+import git, { Repository } from "@/git"
 import { UBERTASK_FILENAME } from "@/tasks"
 import { parse } from "@/ubertask"
 
@@ -99,19 +100,58 @@ describe("open command", () => {
         await fsp.rm(tmp, { recursive: true, force: true })
     })
 
-    // Create a real git repo at <root>/source/<name> with one commit on main
-    // and return its path. Registration is done separately via register().
-    const makeSource = async (name: string): Promise<string> => {
-        const dir = path.join(root, "source", name)
+    // Create a real git repo at `dir` with one commit on main and return its
+    // path — the shared fixture builder behind both source clones and the
+    // local "origin" repos the on-demand clone tests really clone from.
+    const makeRepo = async (dir: string): Promise<string> => {
         await fsp.mkdir(dir, { recursive: true })
         await sh(dir, "init")
         await sh(dir, "config", "user.email", "test@example.com")
         await sh(dir, "config", "user.name", "Test User")
-        await fsp.writeFile(path.join(dir, "README.md"), `${name}\n`)
+        await fsp.writeFile(
+            path.join(dir, "README.md"),
+            `${path.basename(dir)}\n`
+        )
         await sh(dir, "add", "README.md")
         await sh(dir, "commit", "-m", "initial commit")
         await sh(dir, "branch", "-M", "main")
         return dir
+    }
+
+    // A real git repo at <root>/source/<name> with one commit on main.
+    // Registration is done separately via register().
+    const makeSource = (name: string): Promise<string> =>
+        makeRepo(path.join(root, "source", name))
+
+    // A local upstream repo OUTSIDE source/, standing in for a registered
+    // repo's remote so an on-demand clone can be a REAL `git clone` without
+    // touching the network.
+    const makeUpstream = (name: string): Promise<string> =>
+        makeRepo(path.join(root, "upstream", name))
+
+    // Spy on git.clone so no network is hit: the registered https URL resolves
+    // to its <root>/upstream/<name> fixture and is REALLY cloned from there,
+    // so source/<name> ends up a true git repo worktrees can be added to. The
+    // mock records every (url, dest) call, and `throwFor` makes the designated
+    // flat name's clone reject (the failure-resilience path).
+    const mockClone = (throwFor?: string) => {
+        const calls: Array<{ url: string; dest: string }> = []
+        const spy = vi
+            .spyOn(git, "clone")
+            .mockImplementation(async (url: string, dest: string) => {
+                calls.push({ url, dest })
+                const name = (url.split("/").pop() ?? "").replace(/\.git$/, "")
+                if (name === throwFor) {
+                    throw new Error(`boom cloning ${url}`)
+                }
+                const upstream = path.join(root, "upstream", name)
+                if (!fs.existsSync(upstream)) {
+                    throw new Error(`no upstream fixture for ${url}`)
+                }
+                await exec("git", ["clone", upstream, dest])
+                return new Repository(dest)
+            })
+        return { calls, spy }
     }
 
     // Register flat names in the config as github urls, without cloning.
@@ -638,9 +678,12 @@ describe("open command", () => {
             ).toBe(false)
         })
 
-        it("fails fast on an unknown/uncloned repo and creates NOTHING", async () => {
+        it("fails fast on an unregistered repo and creates NOTHING", async () => {
             await makeSource("api")
-            // web is registered but never cloned; ghost was never registered.
+            // web is registered but never cloned (that alone is fine now —
+            // it would be cloned on demand); ghost was never registered, and
+            // an unregistered name has no URL to clone from, so it must fail
+            // loud BEFORE anything is created.
             await register(["api", "web"])
 
             let error: unknown
@@ -659,32 +702,13 @@ describe("open command", () => {
             })
 
             expect(error).toBeInstanceOf(Error)
-            expect((error as Error).message).toContain("ghost")
+            const message = (error as Error).message
+            expect(message).toContain("ghost")
+            expect(message).toContain("not a registered repository")
+            // The error names the valid set, so a typo is self-correcting.
+            expect(message).toContain("api")
+            expect(message).toContain("web")
             // Nothing was created — not even the valid repo's worktree or note.
-            expect(fs.existsSync(path.join(root, "tasks", "alpha"))).toBe(false)
-        })
-
-        it("rejects a registered-but-uncloned repo (cloned = source/<name> exists)", async () => {
-            await makeSource("api")
-            await register(["api", "web"]) // web registered, not cloned
-
-            let error: unknown
-            await captureLogs(async () => {
-                try {
-                    await open.run({
-                        "no-hooks": false,
-                        task: "alpha",
-                        from: undefined,
-                        goal: undefined,
-                        repos: ["api", "web"]
-                    })
-                } catch (e) {
-                    error = e
-                }
-            })
-
-            expect(error).toBeInstanceOf(Error)
-            expect((error as Error).message).toContain("web")
             expect(fs.existsSync(path.join(root, "tasks", "alpha"))).toBe(false)
         })
 
@@ -797,7 +821,13 @@ describe("open command", () => {
     type OpenJson = {
         task: string
         scope: string[]
-        repos: { name: string; status: string }[]
+        repos: { name: string; status: string; reason?: string }[]
+        clone: {
+            name: string
+            status: string
+            reason?: string
+            error?: string
+        }[]
         hooks: { event: string; repo: string; exit: number }[]
         carry: {
             repo: string
@@ -814,6 +844,289 @@ describe("open command", () => {
             mtime: number
         }
     }
+
+    describe("clone on demand (scoped open)", () => {
+        it("clones a scoped registered-but-uncloned repo, then opens it", async () => {
+            await makeSource("api")
+            await makeUpstream("web") // web is registered but never cloned
+            await register(["api", "web"])
+            const { calls } = mockClone()
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api", "web"]
+                })
+            })
+
+            // Only the uncloned repo was cloned — api was already in source/.
+            expect(calls).toEqual([
+                {
+                    url: "https://github.com/acme/web.git",
+                    dest: path.join(root, "source", "web")
+                }
+            ])
+            // The clone landed as a real repo, and the worktree opened off it
+            // on the task branch like any other repo.
+            expect(
+                fs.existsSync(path.join(root, "source", "web", ".git"))
+            ).toBe(true)
+            expect(await branchAt("web", "alpha")).toBe("task/alpha")
+            expect(json.repos).toEqual([
+                { name: "api", status: "created" },
+                { name: "web", status: "created" }
+            ])
+            // The clone phase rides its own array, in clone's per-repo shape.
+            expect(json.clone).toEqual([{ name: "web", status: "cloned" }])
+            expect(json.scope).toEqual(["api", "web"])
+            expect(await scopeOf("alpha")).toEqual(["api", "web"])
+        })
+
+        it("never clones on an unscoped open (no --repos, empty note scope)", async () => {
+            await makeSource("api")
+            await makeUpstream("web")
+            await register(["api", "web"])
+            const { calls } = mockClone()
+
+            const logs = await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            // Today's behaviour exactly: the uncloned repo is skipped with the
+            // run-clone-first hint, and git.clone is never called.
+            expect(calls).toEqual([])
+            expect(fs.existsSync(path.join(root, "source", "web"))).toBe(false)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(false)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            expect(logs.join("\n")).toContain("Skipping web — not cloned")
+        })
+
+        it("re-open with a stored note scope clones a newly registered repo on demand", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api"]
+                })
+            })
+
+            // web is registered AND written into the note's repos: (the
+            // documented hand-edit flow) only AFTER the first open.
+            await makeUpstream("web")
+            await register(["api", "web"])
+            const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+            await fsp.writeFile(
+                note,
+                "goal: |\n  g\n\nrepos:\n  - api\n  - web\n"
+            )
+            const { calls } = mockClone()
+
+            // Re-open WITHOUT --repos: the stored scope alone triggers the
+            // on-demand clone.
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            expect(calls.map((c) => c.url)).toEqual([
+                "https://github.com/acme/web.git"
+            ])
+            expect(json.repos).toEqual([
+                { name: "api", status: "skipped" },
+                { name: "web", status: "created" }
+            ])
+            expect(json.clone).toEqual([{ name: "web", status: "cloned" }])
+            expect(await branchAt("web", "alpha")).toBe("task/alpha")
+        })
+
+        it("fires pre-clone and post-clone with clone's cwd/env contract", async () => {
+            await makeUpstream("web")
+            await registerWithHooks(["web"], {
+                "pre-clone":
+                    'echo "$PWD|$UBEREPO_REPO_PATH|$UBEREPO_EVENT|$UBEREPO_TASK" > "$UBEREPO_WORKSPACE/pre.txt"',
+                "post-clone":
+                    'echo "$PWD|$UBEREPO_TASK" > "$UBEREPO_WORKSPACE/post.txt"'
+            })
+            mockClone()
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["web"]
+                })
+            })
+
+            // pre-clone runs at the workspace root with UBEREPO_REPO_PATH
+            // naming the would-be clone and NO task — the clone events keep
+            // `uberepo clone`'s task-free env contract even when open fires
+            // them.
+            const pre = (
+                await fsp.readFile(path.join(root, "pre.txt"), "utf8")
+            ).trim()
+            expect(pre).toBe(
+                `${root}|${path.join(root, "source", "web")}|pre-clone|`
+            )
+            // post-clone runs in the fresh source clone, still task-free.
+            const post = (
+                await fsp.readFile(path.join(root, "post.txt"), "utf8")
+            ).trim()
+            expect(post).toBe(`${path.join(root, "source", "web")}|`)
+            expect(json.hooks).toEqual([
+                { event: "pre-clone", repo: "web", exit: 0 },
+                { event: "post-clone", repo: "web", exit: 0 }
+            ])
+            expect(json.repos).toEqual([{ name: "web", status: "created" }])
+        })
+
+        it("carries into the fresh worktree of an on-demand clone", async () => {
+            await makeUpstream("web")
+            // post-clone lays an untracked .env into the fresh source clone —
+            // carry must then pick it up for the worktree, proving the clone →
+            // hook → open → carry ordering holds for a lazy clone.
+            await registerWith([{ name: "web", carry: [".env"] }], {
+                hooks: { "post-clone": 'echo "SECRET=1" > .env' }
+            })
+            mockClone()
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["web"]
+                })
+            })
+
+            expect(
+                await fsp.readFile(
+                    path.join(root, "tasks", "alpha", "web", ".env"),
+                    "utf8"
+                )
+            ).toBe("SECRET=1\n")
+            expect(json.carry).toEqual([
+                {
+                    repo: "web",
+                    copied: [".env"],
+                    keptExisting: [],
+                    skippedTracked: []
+                }
+            ])
+        })
+
+        it("reports a failed clone, continues with the rest, and exits non-zero", async () => {
+            await makeUpstream("good")
+            await register(["bad", "good"]) // both registered, neither cloned
+            const { calls } = mockClone("bad")
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: OpenJson
+            try {
+                json = await captureJson<OpenJson>(async () => {
+                    await open.run({
+                        "no-hooks": false,
+                        task: "alpha",
+                        from: undefined,
+                        goal: undefined,
+                        repos: ["bad", "good"]
+                    })
+                })
+                // The failed clone flips the exit code without aborting.
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // Both clones were attempted (per-repo resilience)...
+            expect(calls.map((c) => c.url)).toEqual([
+                "https://github.com/acme/bad.git",
+                "https://github.com/acme/good.git"
+            ])
+            // ...bad carries its error, good was cloned AND opened.
+            expect(json.clone).toEqual([
+                {
+                    name: "bad",
+                    status: "failed",
+                    error: "boom cloning https://github.com/acme/bad.git"
+                },
+                { name: "good", status: "cloned" }
+            ])
+            expect(json.repos).toEqual([
+                { name: "bad", status: "skipped", reason: "clone failed" },
+                { name: "good", status: "created" }
+            ])
+            expect(fs.existsSync(path.join(root, "source", "bad"))).toBe(false)
+            expect(await branchAt("good", "alpha")).toBe("task/alpha")
+            // The failed repo stays in the scope, so a re-run retries it.
+            expect(await scopeOf("alpha")).toEqual(["bad", "good"])
+        })
+
+        it("skips a stored scope name that is not registered, without cloning", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api"]
+                })
+            })
+            // The note scopes a repo that was never registered (e.g. removed
+            // from the manifest after the task opened).
+            const note = path.join(root, "tasks", "alpha", UBERTASK_FILENAME)
+            await fsp.writeFile(
+                note,
+                "goal: |\n  g\n\nrepos:\n  - api\n  - gone\n"
+            )
+            const { calls } = mockClone()
+
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            // Nothing to clone from — a per-repo skip, never an abort or a
+            // clone attempt.
+            expect(calls).toEqual([])
+            expect(json.clone).toEqual([])
+            expect(json.repos).toEqual([
+                { name: "gone", status: "skipped", reason: "not registered" },
+                { name: "api", status: "skipped" }
+            ])
+        })
+    })
 
     describe("--json", () => {
         it("emits task, empty scope, created repos, and the seeded note", async () => {
@@ -837,6 +1150,9 @@ describe("open command", () => {
                 { name: "api", status: "created" },
                 { name: "web", status: "created" }
             ])
+            // No on-demand clone ran (both repos were already cloned), but the
+            // key is always present, so the shape is stable.
+            expect(json.clone).toEqual([])
             // A fresh task byte-copies the template seed; the JSON carries the
             // same TaskNote shape status uses (the template's placeholder goal,
             // empty lists), with a numeric mtime.
@@ -900,6 +1216,7 @@ describe("open command", () => {
                 task: "alpha",
                 scope: [],
                 repos: [],
+                clone: [],
                 hooks: [],
                 carry: []
             })
