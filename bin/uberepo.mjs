@@ -1,18 +1,21 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process"
+// Thin production launcher: load the bundled CLI in-process with plain node —
+// no tsx, no TypeScript, no child process. Node resolves the bin symlink's
+// realpath before executing, so ../dist lands inside the installed package.
+//
+// Development runs from source instead: `npm run dev -- <args>` (tsx).
+import * as fs from "node:fs"
 import * as path from "node:path"
-import { fileURLToPath } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
-const tsx = path.join(root, "node_modules", ".bin", "tsx")
-const entry = path.join(root, "src", "cli.ts")
-const tsconfig = path.join(root, "tsconfig.json")
+const here = path.dirname(fileURLToPath(import.meta.url))
+const entry = path.join(here, "..", "dist", "cli.mjs")
 
-const child = spawn(tsx, ["--tsconfig", tsconfig, entry, ...process.argv.slice(2)], {
-    stdio: "inherit"
-})
-child.on("exit", (code) => process.exit(code ?? 1))
-child.on("error", (err) => {
-    console.error(err.message)
+if (!fs.existsSync(entry)) {
+    console.error(
+        "uberepo: dist/cli.mjs is missing. In a checkout, run `npm run build` first (or use `npm run dev -- <args>` to run from source)."
+    )
     process.exit(1)
-})
+}
+
+await import(pathToFileURL(entry).href)

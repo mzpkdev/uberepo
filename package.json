@@ -3,28 +3,36 @@
   "version": "1.0.0",
   "description": "One workspace for all your repos — a worktree per task across every repo",
   "license": "MIT",
-  "main": "src/cli.ts",
   "bin": {
     "uberepo": "bin/uberepo.mjs"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "template/"
+  ],
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "start": "tsx src/cli.ts",
+    "build": "node scripts/build.mjs",
     "test": "vitest --no-watch",
     "lint": "biome check .",
     "lint:fix": "biome check --fix .",
     "format": "biome format .",
     "format:fix": "biome format --fix .",
-    "typecheck": "tsc --noEmit"
-  },
-  "private": true,
-  "dependencies": {
-    "cmdore": "file:lib",
-    "minimatch": "^9.0.9"
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm test"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.4",
     "@types/node": "^25.9.1",
+    "cmdore": "file:lib",
+    "esbuild": "^0.28.0",
+    "minimatch": "^9.0.9",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"

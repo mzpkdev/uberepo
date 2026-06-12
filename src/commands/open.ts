@@ -10,6 +10,7 @@ import { from } from "@/options/from"
 import { goal } from "@/options/goal"
 import { noHooks } from "@/options/no-hooks"
 import { repos } from "@/options/repos"
+import { TEMPLATE_DIR } from "@/package-root"
 import { type CloneRepo, cloneSource } from "@/sources"
 import {
     type TaskNote,
@@ -31,18 +32,12 @@ type OpenRepo = {
     reason?: string
 }
 
-// The seed ubertask.yml lives in the repo's real template/ dir and is byte-copied
-// into a task at runtime. Resolve it relative to THIS module — not process.cwd(),
-// which is the workspace — exactly as init.ts resolves its template dir, so it
-// works under `npm link`. tsc rejects import.meta.url under module: CommonJS, so
-// __dirname (the real src/commands/ dir) + two levels up is the template root.
-const UBERTASK_TEMPLATE = path.join(
-    __dirname,
-    "..",
-    "..",
-    "template",
-    UBERTASK_FILENAME
-)
+// The seed ubertask.yml lives in the package's real template/ dir and is
+// byte-copied into a task at runtime. TEMPLATE_DIR is anchored to the package
+// root (see package-root.ts) — not process.cwd(), which is the workspace — so
+// it resolves from source under tsx, from the published dist/ bundle, and
+// under `npm link` alike.
+const UBERTASK_TEMPLATE = path.join(TEMPLATE_DIR, UBERTASK_FILENAME)
 
 export default defineCommand({
     name: "open",

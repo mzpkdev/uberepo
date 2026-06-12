@@ -34,6 +34,11 @@ const captureJson = async <T>(fn: () => Promise<void>): Promise<T> => {
 const AGENTS_FILENAME = "AGENTS.md"
 const CLAUDE_FILENAME = "CLAUDE.md"
 const GITIGNORE_FILENAME = ".gitignore"
+// The workspace .gitignore ships DOTLESS in template/ (npm install renames
+// `.gitignore` files inside packages to `.npmignore` on extract); init stamps
+// it back to the real dotted name. So the template source we READ and the
+// stamped target we ASSERT against differ for this one file.
+const GITIGNORE_TEMPLATE_FILENAME = "gitignore"
 // The skill lives in the repo at template/.claude/skills/using-uberepo/ and init
 // stamps it verbatim to the same relative path in the workspace. So this is both
 // the template source we READ and the stamped target we ASSERT against.
@@ -91,7 +96,7 @@ describe("init command", () => {
             "utf8"
         )
         gitignoreTemplate = await fsp.readFile(
-            path.join(TEMPLATE_DIR, GITIGNORE_FILENAME),
+            path.join(TEMPLATE_DIR, GITIGNORE_TEMPLATE_FILENAME),
             "utf8"
         )
         skillTemplate = await fsp.readFile(

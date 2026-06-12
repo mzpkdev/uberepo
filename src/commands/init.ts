@@ -3,6 +3,12 @@ import * as path from "node:path"
 import { defineArgument, defineCommand, terminal } from "cmdore"
 import { CONFIG_FILENAME, Config } from "@/config"
 import { noAgents } from "@/options/no-agents"
+// The default workspace files live in the package's real `template/` directory
+// and are stamped into the workspace at runtime. TEMPLATE_DIR is anchored to
+// the package root (see package-root.ts) — not process.cwd(), which is the
+// workspace being created — so it resolves both from source under tsx and from
+// the published dist/ bundle.
+import { TEMPLATE_DIR } from "@/package-root"
 import { UBERTASK_FILENAME } from "@/tasks"
 
 const name = defineArgument({
@@ -11,23 +17,23 @@ const name = defineArgument({
     description: "Directory to create the workspace in (default: current)"
 })
 
-// The default workspace files live in a real `template/` directory at the repo
-// root and are stamped into the workspace at runtime. Resolve it relative to
-// THIS module — not process.cwd(), which is the workspace being created. The
-// project runs from source under tsx (module: CommonJS), so __dirname is the
-// real src/commands/ dir; template/ is two levels up. (import.meta.url is not
-// usable here: tsc rejects it as TS1343 under module: CommonJS.)
-const TEMPLATE_DIR = path.join(__dirname, "..", "..", "template")
-
 // The subset of template/ paths (by first segment) that brief AI agents on the
 // workspace; these are the only paths `--no-agents` suppresses. AGENTS.md and
 // CLAUDE.md are top-level files; `.claude` and `.agents` are whole template
 // subtrees that stamp into the workspace verbatim — `.claude` is the bundled
 // Claude Code skill, `.agents` the cross-tool copy of the same skill read by
-// Codex and Gemini. Everything else in template/ (currently just .gitignore —
-// workspace hygiene needed to share a committed workspace regardless of AI
+// Codex and Gemini. Everything else in template/ (currently just the workspace
+// .gitignore — hygiene needed to share a committed workspace regardless of AI
 // tooling) always stamps.
 const AGENT_PATHS = ["AGENTS.md", "CLAUDE.md", ".claude", ".agents"]
+
+// Template files whose SHIPPED name differs from the name they stamp as, keyed
+// by template-relative path. npm mangles `.gitignore` files inside packages —
+// even when forced into the tarball via package.json#files, `npm install`
+// renames them to `.npmignore` on extract — so the template ships the
+// workspace ignore file DOTLESS as `gitignore` and the stamp restores the real
+// dotted name (the same trick create-react-app uses for its templates).
+const STAMP_RENAMES: Record<string, string> = { gitignore: ".gitignore" }
 
 // Template files that are per-task SEEDS consumed by a command at runtime, not
 // workspace files init stamps. ubertask.yml is the durable task note: `open`
@@ -59,9 +65,11 @@ const walkFiles = async (root: string, rel = ""): Promise<string[]> => {
 // The walk is recursive so nested template assets (e.g. the `.claude/` skill
 // tree) land too, copied to the same relative path verbatim. `skip` names first
 // path-segments to leave unstamped (the agent paths under --no-agents); the walk
-// surfaces dotfiles too, so template/.gitignore is picked up here. Returns the
-// target-relative paths actually written, for the tidy success line. Adding a
-// new default file is just dropping it in template/ — no change here.
+// surfaces dotfiles too, so the whole .claude/ tree is picked up here. Returns
+// the target-relative paths actually written, for the tidy success line. Adding
+// a new default file is just dropping it in template/ — no change here (unless
+// npm would mangle its name in the tarball: then it ships under a safe name
+// and gets a STAMP_RENAMES entry).
 const stampTemplate = async (
     dir: string,
     skip: readonly string[]
@@ -73,14 +81,17 @@ const stampTemplate = async (
         if (skip.includes(firstSegment)) {
             continue
         }
-        const target = path.join(dir, relPath)
+        // The workspace-relative path this template file stamps AS — identical
+        // to its template-relative path except for the STAMP_RENAMES entries.
+        const targetRel = STAMP_RENAMES[relPath] ?? relPath
+        const target = path.join(dir, targetRel)
         if (fs.existsSync(target)) {
-            terminal.log(`Skipping ${relPath} — already exists`)
+            terminal.log(`Skipping ${targetRel} — already exists`)
             continue
         }
         await fs.promises.mkdir(path.dirname(target), { recursive: true })
         await fs.promises.copyFile(path.join(TEMPLATE_DIR, relPath), target)
-        written.push(relPath)
+        written.push(targetRel)
     }
     return written
 }

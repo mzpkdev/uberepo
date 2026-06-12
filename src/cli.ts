@@ -13,20 +13,30 @@ import ship from "@/commands/ship"
 import sources from "@/commands/sources"
 import status from "@/commands/status"
 import sync from "@/commands/sync"
+import { packageMetadata } from "@/package-root"
 
-execute([
-    add,
-    clone,
-    close,
-    context,
-    diff,
-    init,
-    open,
-    prune,
-    pull,
-    remove,
-    ship,
-    sources,
-    status,
-    sync
-])
+execute(
+    [
+        add,
+        clone,
+        close,
+        context,
+        diff,
+        init,
+        open,
+        prune,
+        pull,
+        remove,
+        ship,
+        sources,
+        status,
+        sync
+    ],
+    {
+        // --help/--version identity. cmdore's default walks up from
+        // process.cwd() and would report whatever package.json happens to
+        // surround the user's workspace; pin it to uberepo's own manifest so
+        // the published CLI reports itself from any directory.
+        metadata: packageMetadata()
+    }
+)
