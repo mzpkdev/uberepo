@@ -33,9 +33,12 @@ across them at once and switch tasks by switching directories — not `git check
 
 1. **Orient.** Run `uberepo status --json` (open tasks + each worktree's
    branch/clean-dirty) and `uberepo sources --json` (registered repos +
-   cloned-or-not). Parse the JSON; don't scrape human text. Re-read before
-   reporting state. `--json` is a global flag on **every** command — pass it to
-   any command for a single stable JSON object describing its outcome.
+   cloned-or-not); when clean/dirty isn't enough, `uberepo diff <task> --json`
+   reports the task's footprint — commits ahead + diffstat per repo (read-only;
+   uncommitted changes aren't counted). Parse the JSON; don't scrape human text.
+   Re-read before reporting state. `--json` is a global flag on **every**
+   command — pass it to any command for a single stable JSON object describing
+   its outcome.
 2. **Work the lifecycle** (one task = one `task/<task>` branch across every repo):
    - `uberepo open <task>` — worktree + `task/<task>` branch in every cloned repo.
      `--from <ref>` chooses a base; `--goal "<text>"` sets the task note's goal;

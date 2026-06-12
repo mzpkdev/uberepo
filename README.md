@@ -134,6 +134,7 @@ decisions:
 | --- | --- |
 | `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`. |
 | `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
+| `uberepo diff <task>` | Show the task's footprint: commits ahead + diffstat per repo. |
 | `uberepo sync <task>` | Rebase the task's worktrees onto fresh upstreams. |
 | `uberepo ship <task>` | Push every branch and open a draft PR per repo (needs `gh`). |
 | `uberepo close <task>` | Remove the worktrees and delete the task branch. |

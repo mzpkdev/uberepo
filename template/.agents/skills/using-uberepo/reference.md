@@ -27,13 +27,27 @@ Re-read state before you report on it; don't scrape human-formatted text.
 | --- | --- |
 | `uberepo sources --json` | Registered repos + whether each is cloned. |
 | `uberepo status --json` | Open tasks; each worktree's branch + clean/dirty. |
+| `uberepo diff <task> --json` | The task's footprint per repo: commits ahead of the origin default + diffstat. |
 
 Drop `--json` for a human-readable table. If `uberepo` isn't on `PATH`, it's
 being run from source — check the workspace `README`.
 
-`--json` is a global flag on **every** command, not just the two above — pass it
+`--json` is a global flag on **every** command, not just the ones above — pass it
 to any command to get a single stable JSON object describing its outcome (and no
 human lines). See [JSON output](#json-output) for the full per-command schema.
+
+### `uberepo diff <task>` — the task's footprint
+
+Read-only report, per repo in the task's scope: the `task/<task>` branch, the
+commits it carries beyond the merge-base with the comparison base (full sha +
+subject, newest first), and the diffstat over that same range. The base is
+resolved exactly like `sync`'s default rebase target — origin's default branch
+(`origin/HEAD`, e.g. `origin/main`) — but **nothing is fetched**: the comparison
+is against the last-fetched upstream state. A repo with no worktree or a
+vanished task branch is reported as `skipped` with a reason, never an error,
+and no hooks fire (it's not a lifecycle op). A `dirty` flag marks a worktree
+with uncommitted changes — **those changes are NOT in the numbers**; commit
+them to see them counted.
 
 ## Task lifecycle
 
@@ -304,6 +318,7 @@ Optional keys (`reason`, `error`, `note`) are omitted when they don't apply.
 | `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `reason` (skip): `"pre-clone hook failed"`; `hooks` lists every hook that ran (pre and post) |
 | `pull` | `{ repos: [{ name, status: "updated" \| "current" \| "skipped", reason? }] }` — `reason`: `"not cloned"`, `"uncommitted changes"`, `"can't fast-forward"` |
 | `status` | `[{ name, repos: [{ name, branch?, dirty }], note? }]` |
+| `diff` | `{ task, base, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
 | `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`; `hooks` lists every hook that ran (pre and post); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
 | `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
 | `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |

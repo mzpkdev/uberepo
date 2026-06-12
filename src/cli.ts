@@ -2,6 +2,7 @@ import { execute } from "cmdore"
 import add from "@/commands/add"
 import clone from "@/commands/clone"
 import close from "@/commands/close"
+import diff from "@/commands/diff"
 import init from "@/commands/init"
 import open from "@/commands/open"
 import prune from "@/commands/prune"
@@ -16,6 +17,7 @@ execute([
     add,
     clone,
     close,
+    diff,
     init,
     open,
     prune,
