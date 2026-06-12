@@ -2,7 +2,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
-import { Config, TASKS_DIR } from "@/config"
+import { type CarryEntry, runCarry } from "@/carry"
+import { Config, repositoryUrl, TASKS_DIR } from "@/config"
 import git from "@/git"
 import { type HookResult, runHook } from "@/hooks"
 import { from } from "@/options/from"
@@ -59,7 +60,8 @@ export default defineCommand({
         // UBEREPO_REPO_URL (the loop below works in flat names).
         const cloned: string[] = []
         const urlByName = new Map<string, string>()
-        for (const url of config.repositories) {
+        for (const entry of config.repositories) {
+            const url = repositoryUrl(entry)
             const { name } = normalizeRepository(url)
             urlByName.set(name, url)
             if (fs.existsSync(path.join(root, "source", name))) {
@@ -71,8 +73,15 @@ export default defineCommand({
 
         if (cloned.length === 0) {
             // No worktree is opened and no note is seeded on this path, so the
-            // JSON carries an empty scope/repos, no hooks, and no note key.
-            terminal.json({ task: argv.task, scope: [], repos: [], hooks: [] })
+            // JSON carries an empty scope/repos, no hooks or carry, and no
+            // note key.
+            terminal.json({
+                task: argv.task,
+                scope: [],
+                repos: [],
+                hooks: [],
+                carry: []
+            })
             terminal.log("Nothing to open — no cloned repositories.")
             return
         }
@@ -129,6 +138,11 @@ export default defineCommand({
         // code at the end without aborting the rest.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
+        // One entry per repo whose carry actually ran (a NEWLY-created worktree
+        // in a repo with carry patterns): the untracked local files copied in,
+        // kept, or skipped as tracked. A skipped (already-open) worktree keeps
+        // its files as-is — `sync` is the missing-files repair.
+        const carry: CarryEntry[] = []
         for (const name of targets) {
             const dest = worktreePath(root, argv.task, name)
             const relative = path.join(TASKS_DIR, argv.task, name)
@@ -182,6 +196,18 @@ export default defineCommand({
             await repo.worktree(dest).create({ branch, from: base })
             repos.push({ name, status: "created" })
             opened += 1
+            // Carry the configured untracked local files (.env and friends)
+            // from the source clone into the fresh worktree BEFORE post-open
+            // fires, so a hook like `npm ci && db:migrate` finds them in place.
+            const carried = await runCarry({
+                config,
+                name,
+                source: path.join(root, "source", name),
+                worktree: dest
+            })
+            if (carried) {
+                carry.push({ repo: name, ...carried })
+            }
             // post-open fires for the NEWLY-created worktree only, with cwd =
             // the worktree and branch = task/<task>. A hook failure is recorded
             // and the loop continues — the worktree already exists.
@@ -264,6 +290,7 @@ export default defineCommand({
             scope,
             repos,
             hooks,
+            carry,
             // Omit the note key when absent, matching #2's omit-when-absent.
             ...(finalNote ? { note: finalNote } : {})
         })

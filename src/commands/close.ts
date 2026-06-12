@@ -2,7 +2,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
-import { Config } from "@/config"
+import { carryDrift } from "@/carry"
+import { Config, repositoryUrl } from "@/config"
 import git from "@/git"
 import { type HookResult, runHook } from "@/hooks"
 import { force } from "@/options/force"
@@ -19,6 +20,15 @@ type CloseRepo = {
     name: string
     status: "closed" | "skipped"
     reason?: string
+}
+
+// Carried files whose worktree copy diverged from the source copy at close
+// time: untracked local config edited inside the task, about to vanish with
+// the worktree. One entry per repo that has any. Warn-only — never a blocker,
+// since the files were never git's to protect.
+type CarryModified = {
+    repo: string
+    modified: string[]
 }
 
 export default defineCommand({
@@ -44,7 +54,8 @@ export default defineCommand({
             dest: string
             url: string
         }[] = []
-        for (const url of config.repositories) {
+        for (const entry of config.repositories) {
+            const url = repositoryUrl(entry)
             const { name } = normalizeRepository(url)
             const source = path.join(root, "source", name)
             const dest = worktreePath(root, argv.task, name)
@@ -77,6 +88,7 @@ export default defineCommand({
         // end without aborting the remaining repos.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
+        const carry: CarryModified[] = []
 
         for (const { name, source, dest, url } of targets) {
             const repo = git(source)
@@ -136,6 +148,21 @@ export default defineCommand({
                 }
             }
 
+            // Carried local files live outside git, so the dirty/unmerged
+            // guards never see an edited .env — surface the divergence while
+            // the bytes still exist. Warn-only: close proceeds regardless.
+            const modified = await carryDrift({
+                config,
+                name,
+                source,
+                worktree: dest
+            })
+            if (modified.length > 0) {
+                carry.push({ repo: name, modified })
+                terminal.warn(
+                    `${name}: carried files modified in this task; changes will be lost — ${modified.join(", ")}`
+                )
+            }
             // Safe (or --force): the worktree must go before the branch, since
             // git refuses to delete a branch that is still checked out.
             await wt.remove({ force: argv.force })
@@ -169,13 +196,20 @@ export default defineCommand({
                 task: argv.task,
                 forced: argv.force,
                 repos: [],
-                hooks: []
+                hooks: [],
+                carry: []
             })
             terminal.warn(`No open task ${argv.task} to close.`)
             return
         }
 
-        terminal.json({ task: argv.task, forced: argv.force, repos, hooks })
+        terminal.json({
+            task: argv.task,
+            forced: argv.force,
+            repos,
+            hooks,
+            carry
+        })
 
         terminal.log(
             `Closed task ${argv.task} in ${closed} ${

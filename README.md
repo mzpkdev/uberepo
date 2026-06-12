@@ -28,7 +28,7 @@ That's the five checkouts. One command.
 Every repo gets a `task/big-rename` worktree under `tasks/big-rename/`; you switch tasks by changing folders, and your `main` checkout never moves. On disk:
 ```text
 my-workspace/
-├── uberepo.json                    # the manifest: which repos, which hooks
+├── uberepo.json                    # the manifest: which repos, which hooks, what to carry
 ├── source/                         # one canonical clone per repo
 │   ├── api/
 │   └── web/
@@ -145,6 +145,7 @@ Every command accepts `--json`. The lifecycle commands (`clone`, `open`, `sync`,
 No daemon. No database. No lock file. State lives in git (branches + worktrees), in `uberepo.json` (the manifest), and in `ubertask.yml` (the task note). überepo itself is a thin, opinionated layer over `git worktree`:
 - **Worktrees do the heavy lifting.** Every task branch is a real `git worktree` checkout — überepo reads git's own registry, so there's nothing to desync.
 - **Hooks handle the setup grind.** Wire pre-/post- hooks around every lifecycle command (`clone`, `open`, `sync`, `ship`, `close`) into `uberepo.json`; überepo fires them per repo with `UBEREPO_TASK` and `UBEREPO_REPO_*` in the environment — `npm install`, a `.env`, a test gate before `ship` ([full reference](docs/hooks.md)).
+- **Carry brings your local config along.** Fresh worktrees hold only tracked files; list glob patterns under `carry` in `uberepo.json` (workspace-wide or per repo) and überepo copies the matching untracked files — `.env`, override files, local certs — from `source/<name>` into every task worktree on `open` and `sync`, never overwriting your in-task edits ([full reference](docs/carry.md)).
 - **It never commits for you.** Branches and worktrees are überepo's job; the commits and pushes stay yours (or your agent's). A coordinator, not a backseat driver.
 
 ---

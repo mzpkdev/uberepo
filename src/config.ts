@@ -1,13 +1,33 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 
+// One registered repository: a bare clone-URL string (the original, common
+// form) or an object carrying per-repo settings alongside the same `url`.
+// Today the only per-repo setting is `carry` — glob patterns (relative to the
+// repo root) of untracked local files to copy into task worktrees.
+export type RepositoryEntry =
+    | string
+    | {
+          url: string
+          carry?: string[]
+      }
+
 export type UberepoConfig = {
-    repositories: string[]
+    repositories: RepositoryEntry[]
+    // Workspace-level carry patterns, applied to EVERY repo. A repo's effective
+    // pattern set is the union of this list and its own entry's `carry`.
+    carry?: string[]
     // A PARTIAL map: any subset of the valid events may be bound (declaring just
     // `post-clone` is valid). Absent entirely = no hooks. The validator rejects
     // unknown keys, so the runtime shape can only ever be a subset of HookEvent.
     hooks?: Partial<Record<HookEvent, string>>
 }
+
+// The registered clone URL of a repositories entry, whichever form it takes.
+// Commands that only need the URL (every iteration over `repositories`) read
+// it through this so both entry forms stay interchangeable.
+export const repositoryUrl = (entry: RepositoryEntry): string =>
+    typeof entry === "string" ? entry : entry.url
 
 export const CONFIG_FILENAME = "uberepo.json"
 
@@ -54,6 +74,20 @@ const locate = (cwd: string): string | undefined => {
     }
 }
 
+// Shared invariant for both carry sites (the workspace level and a repo
+// entry): an array of non-empty pattern strings. `where` names the offending
+// site in the throw so a multi-repo manifest fails loud AND located.
+const validateCarry = (value: unknown, where: string, file: string): void => {
+    if (
+        !Array.isArray(value) ||
+        value.some((p) => typeof p !== "string" || p.trim() === "")
+    ) {
+        throw new Error(
+            `${file}: ${where} must be an array of non-empty glob pattern strings`
+        )
+    }
+}
+
 // JSON.parse + defaults-merge + invariant checks, with friendly throws.
 const parse = (raw: string, file: string): UberepoConfig => {
     let data: unknown
@@ -64,7 +98,47 @@ const parse = (raw: string, file: string): UberepoConfig => {
     }
     const config = { ...DEFAULTS, ...(data as Partial<UberepoConfig>) }
     if (!Array.isArray(config.repositories)) {
-        throw new Error(`${file}: "repositories" must be an array of strings`)
+        throw new Error(
+            `${file}: "repositories" must be an array of URL strings or { url, carry } objects`
+        )
+    }
+    // Each entry is a URL string (backward compatible) or a { url, carry }
+    // object. Object entries are validated key by key — an unknown key is a
+    // typo guard (mirroring the hooks event guard), a missing/empty `url` or a
+    // malformed `carry` fails loud at read time rather than mid-command.
+    for (const entry of config.repositories) {
+        if (typeof entry === "string") {
+            continue
+        }
+        if (
+            typeof entry !== "object" ||
+            entry === null ||
+            Array.isArray(entry)
+        ) {
+            throw new Error(
+                `${file}: each "repositories" entry must be a URL string or a { url, carry } object`
+            )
+        }
+        for (const key of Object.keys(entry)) {
+            if (key !== "url" && key !== "carry") {
+                throw new Error(
+                    `${file}: a "repositories" entry has an unknown key "${key}" — valid keys are url, carry`
+                )
+            }
+        }
+        if (typeof entry.url !== "string" || entry.url.trim() === "") {
+            throw new Error(
+                `${file}: a "repositories" entry object must have a non-empty "url" string`
+            )
+        }
+        if (entry.carry !== undefined) {
+            validateCarry(entry.carry, `"carry" for ${entry.url}`, file)
+        }
+    }
+    // Workspace-level carry: optional and backward-compatible like hooks — an
+    // absent key reads as no patterns (the key stays off `config` entirely).
+    if (config.carry !== undefined) {
+        validateCarry(config.carry, `"carry"`, file)
     }
     // `hooks` is optional and backward-compatible: an absent key reads as no
     // hooks (the key stays off `config` entirely). When present it must be an

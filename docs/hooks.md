@@ -3,7 +3,9 @@
 Hooks run a shell command in every repo, around each git operation uberepo
 performs there. They cover the per-repo setup and checks you'd otherwise do by
 hand: installing dependencies, copying an untracked config, running the tests
-before a push.
+before a push. (For the plain copy-local-config-into-worktrees case there is a
+declarative alternative: [carry](carry.md), which runs before the `post-open`
+and `post-sync` hooks so they can rely on the files being in place.)
 
 ## The `hooks` block
 

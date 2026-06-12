@@ -8,7 +8,7 @@ prefer it if this file and the CLI ever disagree.
 ## Workspace layout
 
     <workspace>/
-    ├── uberepo.json          # manifest: the registered repository URLs
+    ├── uberepo.json          # manifest: the registered repos, hooks, carry
     ├── source/<name>/        # canonical clone of each repo — DON'T work here
     └── tasks/<task>/<name>/  # per-task worktree of each repo, on branch task/<task>
 
@@ -51,6 +51,9 @@ cloned repo, off each clone's current HEAD.
   cloned repo).
 - Idempotent: re-running skips repos already opened and picks up repos cloned
   since the first run.
+- If `uberepo.json` declares [carry](#carry--local-files-into-worktrees)
+  patterns, matching untracked local files (`.env` and friends) are copied
+  from `source/<name>` into each fresh worktree, before its `post-open` hook.
 
 ### Work — edit, commit, push (per repo)
 
@@ -225,6 +228,37 @@ with no `hooks` key behaves exactly as before — hooks are entirely opt-in.
 - **Kill switch:** pass `--no-hooks` (on `clone`/`open`/`sync`/`ship`/`close`),
   or set the `UBEREPO_NO_HOOKS` env var, to skip every hook for that run.
 
+## Carry — local files into worktrees
+
+A fresh worktree has only tracked files, so untracked local config (`.env`,
+override files, certs) stays behind in `source/<name>`. `carry` glob patterns
+in `uberepo.json` name the untracked files to copy into task worktrees —
+workspace-level, per repo (a `{ "url", "carry" }` entry instead of a bare URL
+string), or both; a repo's effective set is the union of the two.
+
+    {
+      "repositories": [
+        "git@github.com:acme/api.git",
+        { "url": "git@github.com:acme/web.git", "carry": ["certs/*.pem"] }
+      ],
+      "carry": [".env*"]
+    }
+
+- Patterns are relative to the repo root and anchored there; `*`/`?` don't
+  cross `/`, `**` does (`**/.env*` = any depth). Dotfiles match normally.
+- Only files git does NOT track (untracked + ignored) are copied; a pattern
+  matching a tracked file is warned about and skipped, never copied.
+- **Never overwrites**: a file already in the worktree is kept (your in-task
+  edits win), so carry is idempotent.
+- `open` carries into each fresh worktree **before its `post-open` hook**;
+  `sync` re-carries (missing files only) **before `post-sync`** — hooks can
+  rely on the files being there. `close` warns (warn-only, never blocks) when
+  a carried file was modified in the task: those edits die with the worktree,
+  so copy anything valuable out first.
+- Carry gitignored files. A carried file that is NOT ignored counts as
+  untracked work in the worktree — it will trip `sync`'s dirty refusal and
+  `close`'s uncommitted-changes guard like any hand-made file.
+
 ## Set up / share a workspace
 
 | Command | Effect |
@@ -270,10 +304,10 @@ Optional keys (`reason`, `error`, `note`) are omitted when they don't apply.
 | `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `reason` (skip): `"pre-clone hook failed"`; `hooks` lists every hook that ran (pre and post) |
 | `pull` | `{ repos: [{ name, status: "updated" \| "current" \| "skipped", reason? }] }` — `reason`: `"not cloned"`, `"uncommitted changes"`, `"can't fast-forward"` |
 | `status` | `[{ name, repos: [{ name, branch?, dirty }], note? }]` |
-| `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], hooks: [{ event, repo, exit }], note? }` — `reason` (skip): `"pre-open hook failed"`; `hooks` lists every hook that ran (pre and post); `note` is the full task note (see below); absent only when nothing is cloned |
-| `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post) |
+| `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`; `hooks` lists every hook that ran (pre and post); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
+| `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
 | `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |
-| `close` | `{ task, forced: bool, repos: [{ name, status: "closed" \| "skipped", reason? }], hooks: [{ event, repo, exit }] }` — `reason`: `"uncommitted changes"`, `"unmerged commits"`, `"pre-close hook failed"` |
+| `close` | `{ task, forced: bool, repos: [{ name, status: "closed" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, modified }] }` — `reason`: `"uncommitted changes"`, `"unmerged commits"`, `"pre-close hook failed"`; `carry` lists carried files modified inside the task (warn-only — their edits are lost with the worktree) |
 | `prune` | `{ forced: bool, tasks: [{ task, status: "pruned" \| "kept", reason? }] }` — `reason`: `"dirty"`, `"unmerged"`, or the failure message; when `forced` is false a `"pruned"` status means a preview candidate (nothing removed yet) |
 
 The `note` object (in `status` and `open`) is the parsed `ubertask.yml` plus its

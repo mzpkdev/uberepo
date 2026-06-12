@@ -1,6 +1,6 @@
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
-import { Config } from "@/config"
+import { Config, repositoryUrl } from "@/config"
 import git, { type Repository } from "@/git"
 import { force } from "@/options/force"
 import {
@@ -36,8 +36,8 @@ const targetsOf = async (task: Task): Promise<Target[]> => {
     const config = await Config.read()
     const root = await Config.root()
     const byName = new Map<string, string>()
-    for (const url of config.repositories) {
-        const { name } = normalizeRepository(url)
+    for (const entry of config.repositories) {
+        const { name } = normalizeRepository(repositoryUrl(entry))
         byName.set(name, path.join(root, "source", name))
     }
     const { inScope } = partitionScope(

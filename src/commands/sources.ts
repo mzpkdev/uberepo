@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
-import { CONFIG_FILENAME, Config } from "@/config"
+import { CONFIG_FILENAME, Config, repositoryUrl } from "@/config"
 import { normalizeRepository } from "@/url"
 
 export default defineCommand({
@@ -11,7 +11,8 @@ export default defineCommand({
     async run() {
         const config = await Config.read()
         const root = await Config.root()
-        const rows = config.repositories.map((url) => {
+        const rows = config.repositories.map((entry) => {
+            const url = repositoryUrl(entry)
             const { name } = normalizeRepository(url)
             return {
                 name,

@@ -1,6 +1,6 @@
 import { defineCommand, terminal } from "cmdore"
 import { repositories } from "@/arguments/repositories"
-import { CONFIG_FILENAME, Config } from "@/config"
+import { CONFIG_FILENAME, Config, repositoryUrl } from "@/config"
 import { normalizeRepository } from "@/url"
 
 export default defineCommand({
@@ -12,7 +12,9 @@ export default defineCommand({
         // Validate every URL first so a single bad one writes nothing.
         const normalized = argv.repositories.map(normalizeRepository)
         const seen = new Set(
-            config.repositories.map((r) => normalizeRepository(r).key)
+            config.repositories.map(
+                (r) => normalizeRepository(repositoryUrl(r)).key
+            )
         )
         const toAdd: string[] = []
         const names: string[] = []

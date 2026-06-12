@@ -60,6 +60,13 @@ across them at once and switch tasks by switching directories — not `git check
      reference.md). A hook may already have installed deps or copied configs —
      check before redoing that work. `--no-hooks` skips them for a run; use it
      when the human asks, not by default.
+   - **Carry (optional):** if `uberepo.json` has `carry` glob patterns
+     (workspace-level and/or per repo), `open` copies the matching untracked
+     local files (`.env`, certs) from `source/<name>` into each fresh worktree
+     before its post-open hook, and `sync` re-copies missing ones. Existing
+     worktree files are never overwritten. `close` warns when a carried file
+     was edited in the task — those edits are lost with the worktree, so copy
+     them out first if they matter (details in reference.md).
 3. **For flags, sharing, and refusal-recovery**, read [reference.md](reference.md).
    `uberepo --help` lists every command and flag.
 

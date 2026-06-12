@@ -387,6 +387,7 @@ describe("close command", () => {
         forced: boolean
         hooks: { event: string; repo: string; exit: number }[]
         repos: { name: string; status: string; reason?: string }[]
+        carry: { repo: string; modified: string[] }[]
     }
 
     describe("--json", () => {
@@ -411,7 +412,8 @@ describe("close command", () => {
                 repos: [
                     { name: "api", status: "closed" },
                     { name: "web", status: "closed" }
-                ]
+                ],
+                carry: []
             })
         })
 
@@ -449,7 +451,8 @@ describe("close command", () => {
                         status: "skipped",
                         reason: "unmerged commits"
                     }
-                ]
+                ],
+                carry: []
             })
         })
 
@@ -470,7 +473,8 @@ describe("close command", () => {
                 task: "alpha",
                 forced: true,
                 hooks: [],
-                repos: [{ name: "api", status: "closed" }]
+                repos: [{ name: "api", status: "closed" }],
+                carry: []
             })
         })
 
@@ -489,7 +493,8 @@ describe("close command", () => {
                 task: "ghost",
                 forced: false,
                 hooks: [],
-                repos: []
+                repos: [],
+                carry: []
             })
         })
     })
@@ -610,6 +615,107 @@ describe("close command", () => {
             expect(json.repos).toEqual([{ name: "api", status: "closed" }])
             expect(json.hooks).toEqual([])
             expect(fs.existsSync(taskDir("alpha", "api"))).toBe(false)
+        })
+    })
+
+    describe("carry", () => {
+        // Register flat names plus workspace-level carry patterns. The carried
+        // fixtures are gitignored so they never trip close's dirty guard —
+        // exactly the gap the drift warning exists to cover.
+        const registerWithCarry = async (
+            names: string[],
+            carry: string[]
+        ): Promise<void> => {
+            await fsp.writeFile(
+                configPath,
+                `${JSON.stringify(
+                    {
+                        repositories: names.map(
+                            (n) => `https://github.com/acme/${n}.git`
+                        ),
+                        carry
+                    },
+                    null,
+                    4
+                )}\n`
+            )
+        }
+
+        // Commit a .gitignore on main (and push it upstream) BEFORE the
+        // worktree opens, so the carried files stay ignored everywhere and the
+        // task branch remains merged into origin/main.
+        const ignore = async (name: string, lines: string[]): Promise<void> => {
+            const dir = path.join(root, "source", name)
+            await fsp.writeFile(
+                path.join(dir, ".gitignore"),
+                `${lines.join("\n")}\n`
+            )
+            await sh(dir, "add", ".gitignore")
+            await sh(dir, "commit", "-m", "ignore local files")
+            await sh(dir, "push", "origin", "main")
+        }
+
+        it("warns about carried files modified in the task, without blocking the close", async () => {
+            await makeSource("api")
+            await ignore("api", [".env"])
+            await registerWithCarry(["api"], [".env"])
+            await fsp.writeFile(
+                path.join(root, "source", "api", ".env"),
+                "ORIGINAL\n"
+            )
+            const wt = await openWorktree("api", "alpha")
+            // The carried copy was edited inside the task; git never saw it.
+            await fsp.writeFile(path.join(wt, ".env"), "EDITED\n")
+
+            const { warnings } = await captureOutput(async () => {
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
+            })
+
+            expect(warnings.join("\n")).toContain(
+                "api: carried files modified in this task; changes will be lost — .env"
+            )
+            // Warn-only: the worktree and branch are gone regardless.
+            expect(fs.existsSync(taskDir("alpha", "api"))).toBe(false)
+            expect(await branchExists("api", "alpha")).toBe(false)
+        })
+
+        it("emits the modified files under --json and stays silent when identical", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await ignore("api", [".env"])
+            await ignore("web", [".env"])
+            await registerWithCarry(["api", "web"], [".env"])
+            await fsp.writeFile(
+                path.join(root, "source", "api", ".env"),
+                "ORIGINAL\n"
+            )
+            await fsp.writeFile(
+                path.join(root, "source", "web", ".env"),
+                "SAME\n"
+            )
+            const apiWt = await openWorktree("api", "alpha")
+            const webWt = await openWorktree("web", "alpha")
+            await fsp.writeFile(path.join(apiWt, ".env"), "EDITED\n")
+            await fsp.writeFile(path.join(webWt, ".env"), "SAME\n")
+
+            const json = await captureJson<CloseJson>(async () => {
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
+            })
+
+            // Only the diverged repo appears; the byte-identical one is quiet.
+            expect(json.carry).toEqual([{ repo: "api", modified: [".env"] }])
+            expect(json.repos).toEqual([
+                { name: "api", status: "closed" },
+                { name: "web", status: "closed" }
+            ])
         })
     })
 })

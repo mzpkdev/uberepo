@@ -142,6 +142,27 @@ describe("open command", () => {
         )
     }
 
+    // Register repositories — a flat name (plain URL string) or a
+    // { name, carry } per-repo entry — plus any top-level carry/hooks, so the
+    // carry wiring can be exercised in every config shape.
+    const registerWith = async (
+        entries: (string | { name: string; carry: string[] })[],
+        extra: { carry?: string[]; hooks?: Record<string, string> } = {}
+    ): Promise<void> => {
+        const repositories = entries.map((entry) =>
+            typeof entry === "string"
+                ? `https://github.com/acme/${entry}.git`
+                : {
+                      url: `https://github.com/acme/${entry.name}.git`,
+                      carry: entry.carry
+                  }
+        )
+        await fsp.writeFile(
+            configPath,
+            `${JSON.stringify({ repositories, ...extra }, null, 4)}\n`
+        )
+    }
+
     // Realpath of <root>/tasks/<task>/<name>, for comparing against the path
     // git reports (which is canonicalised under /private/var on macOS).
     const worktreeReal = async (task: string, name: string): Promise<string> =>
@@ -778,6 +799,12 @@ describe("open command", () => {
         scope: string[]
         repos: { name: string; status: string }[]
         hooks: { event: string; repo: string; exit: number }[]
+        carry: {
+            repo: string
+            copied: string[]
+            keptExisting: string[]
+            skippedTracked: string[]
+        }[]
         note?: {
             goal: string
             repos: string[]
@@ -873,7 +900,8 @@ describe("open command", () => {
                 task: "alpha",
                 scope: [],
                 repos: [],
-                hooks: []
+                hooks: [],
+                carry: []
             })
             expect(json.note).toBeUndefined()
         })
@@ -1083,6 +1111,157 @@ describe("open command", () => {
                     "api"
                 )}|pre-open`
             )
+        })
+    })
+
+    describe("carry", () => {
+        // Lay an untracked local file into a source clone (the .env that never
+        // makes it into a fresh worktree).
+        const localFile = async (
+            name: string,
+            file: string,
+            contents: string
+        ): Promise<void> => {
+            const target = path.join(root, "source", name, file)
+            await fsp.mkdir(path.dirname(target), { recursive: true })
+            await fsp.writeFile(target, contents)
+        }
+
+        const openAlpha = async (): Promise<void> => {
+            await open.run({
+                "no-hooks": false,
+                task: "alpha",
+                from: undefined,
+                goal: undefined,
+                repos: undefined
+            })
+        }
+
+        it("copies matching untracked files into every fresh worktree", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await registerWith(["api", "web"], { carry: [".env*"] })
+            await localFile("api", ".env", "API=1\n")
+            await localFile("web", ".env", "WEB=1\n")
+            await localFile("web", "notes.txt", "not carried\n")
+
+            const json = await captureJson<OpenJson>(openAlpha)
+
+            expect(
+                await fsp.readFile(
+                    path.join(root, "tasks", "alpha", "api", ".env"),
+                    "utf8"
+                )
+            ).toBe("API=1\n")
+            expect(
+                await fsp.readFile(
+                    path.join(root, "tasks", "alpha", "web", ".env"),
+                    "utf8"
+                )
+            ).toBe("WEB=1\n")
+            expect(
+                fs.existsSync(
+                    path.join(root, "tasks", "alpha", "web", "notes.txt")
+                )
+            ).toBe(false)
+            expect(json.carry).toEqual([
+                {
+                    repo: "api",
+                    copied: [".env"],
+                    keptExisting: [],
+                    skippedTracked: []
+                },
+                {
+                    repo: "web",
+                    copied: [".env"],
+                    keptExisting: [],
+                    skippedTracked: []
+                }
+            ])
+        })
+
+        it("unions workspace-level and per-repo patterns per entry", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await registerWith(
+                [{ name: "api", carry: ["certs/*.pem"] }, "web"],
+                { carry: [".env"] }
+            )
+            await localFile("api", ".env", "A\n")
+            await localFile("api", "certs/local.pem", "PEM\n")
+            // web's entry has no certs pattern, so its cert stays behind.
+            await localFile("web", "certs/local.pem", "PEM\n")
+
+            const json = await captureJson<OpenJson>(openAlpha)
+
+            const api = path.join(root, "tasks", "alpha", "api")
+            expect(fs.existsSync(path.join(api, ".env"))).toBe(true)
+            expect(fs.existsSync(path.join(api, "certs", "local.pem"))).toBe(
+                true
+            )
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web", "certs"))
+            ).toBe(false)
+            expect(json.carry).toEqual([
+                {
+                    repo: "api",
+                    copied: [".env", "certs/local.pem"],
+                    keptExisting: [],
+                    skippedTracked: []
+                },
+                {
+                    repo: "web",
+                    copied: [],
+                    keptExisting: [],
+                    skippedTracked: []
+                }
+            ])
+        })
+
+        it("carries BEFORE the post-open hook fires, so the hook sees the files", async () => {
+            await makeSource("api")
+            await registerWith(["api"], {
+                carry: [".env"],
+                // The hook can only copy .env if carry already landed it.
+                hooks: { "post-open": "cp .env env-seen-by-hook" }
+            })
+            await localFile("api", ".env", "SECRET=1\n")
+
+            const json = await captureJson<OpenJson>(openAlpha)
+
+            expect(
+                await fsp.readFile(
+                    path.join(
+                        root,
+                        "tasks",
+                        "alpha",
+                        "api",
+                        "env-seen-by-hook"
+                    ),
+                    "utf8"
+                )
+            ).toBe("SECRET=1\n")
+            expect(json.hooks).toEqual([
+                { event: "post-open", repo: "api", exit: 0 }
+            ])
+        })
+
+        it("does NOT re-carry into an already-open (skipped) worktree", async () => {
+            await makeSource("api")
+            await registerWith(["api"], { carry: [".env"] })
+            await localFile("api", ".env", "SECRET=1\n")
+
+            await captureJson<OpenJson>(openAlpha)
+            const carried = path.join(root, "tasks", "alpha", "api", ".env")
+            expect(fs.existsSync(carried)).toBe(true)
+            // Remove the carried copy; a re-open skips the worktree and must
+            // leave it missing (sync is the missing-files repair).
+            await fsp.rm(carried)
+
+            const rerun = await captureJson<OpenJson>(openAlpha)
+            expect(rerun.repos).toEqual([{ name: "api", status: "skipped" }])
+            expect(rerun.carry).toEqual([])
+            expect(fs.existsSync(carried)).toBe(false)
         })
     })
 })

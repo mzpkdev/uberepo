@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { Config, TASKS_DIR } from "@/config"
+import { Config, repositoryUrl, TASKS_DIR } from "@/config"
 import git from "@/git"
 import type { Ubertask } from "@/ubertask"
 import * as ubertask from "@/ubertask"
@@ -120,8 +120,8 @@ export const openTasks = async (options?: {
     const root = await Config.root(options)
 
     const byTask = new Map<string, Map<string, TaskRepo>>()
-    for (const url of config.repositories) {
-        const { name } = normalizeRepository(url)
+    for (const entry of config.repositories) {
+        const { name } = normalizeRepository(repositoryUrl(entry))
         const source = path.join(root, "source", name)
         if (!fs.existsSync(source)) {
             continue

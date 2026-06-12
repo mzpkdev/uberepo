@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
-import { Config } from "@/config"
+import { Config, repositoryUrl } from "@/config"
 import git from "@/git"
 import { type HookResult, runHook } from "@/hooks"
 import { noHooks } from "@/options/no-hooks"
@@ -36,7 +36,8 @@ export default defineCommand({
         // Collision guard: fail loud BEFORE cloning anything if two distinct
         // repositories map to the same flat source/<name> folder.
         const seen = new Map<string, { url: string; key: string }>()
-        for (const url of config.repositories) {
+        for (const entry of config.repositories) {
+            const url = repositoryUrl(entry)
             const { key, name } = normalizeRepository(url)
             const prior = seen.get(name)
             if (prior && prior.key !== key) {
@@ -55,7 +56,8 @@ export default defineCommand({
         // without aborting the remaining clones.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
-        for (const url of config.repositories) {
+        for (const entry of config.repositories) {
+            const url = repositoryUrl(entry)
             const { name } = normalizeRepository(url)
             const dest = path.join(root, "source", name)
             if (fs.existsSync(dest)) {

@@ -19,7 +19,8 @@
   },
   "private": true,
   "dependencies": {
-    "cmdore": "file:lib"
+    "cmdore": "file:lib",
+    "minimatch": "^9.0.9"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.4",

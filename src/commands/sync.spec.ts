@@ -538,6 +538,12 @@ describe("sync command", () => {
         onto: string
         repos: { name: string; status: string; reason?: string }[]
         hooks: { event: string; repo: string; exit: number }[]
+        carry: {
+            repo: string
+            copied: string[]
+            keptExisting: string[]
+            skippedTracked: string[]
+        }[]
     }
 
     describe("--json", () => {
@@ -571,7 +577,8 @@ describe("sync command", () => {
                     { name: "api", status: "rebased" },
                     { name: "web", status: "rebased" }
                 ],
-                hooks: []
+                hooks: [],
+                carry: []
             })
         })
 
@@ -606,7 +613,8 @@ describe("sync command", () => {
                     { name: "api", status: "conflict" },
                     { name: "web", status: "skipped", reason: "not reached" }
                 ],
-                hooks: []
+                hooks: [],
+                carry: []
             })
             // Leave the tree clean so afterEach can remove the worktree.
             await sh(apiWt, "rebase", "--abort")
@@ -640,7 +648,8 @@ describe("sync command", () => {
                     },
                     { name: "web", status: "skipped", reason: "not reached" }
                 ],
-                hooks: []
+                hooks: [],
+                carry: []
             })
         })
 
@@ -678,7 +687,8 @@ describe("sync command", () => {
                 task: "ghost",
                 onto: "",
                 repos: [],
-                hooks: []
+                hooks: [],
+                carry: []
             })
         })
     })
@@ -833,6 +843,111 @@ describe("sync command", () => {
             ])
             expect(await reachable("api", "alpha", apiTip)).toBe(false)
             expect(await reachable("web", "alpha", webTip)).toBe(true)
+        })
+    })
+
+    describe("carry", () => {
+        // Register flat names plus carry patterns (and optionally hooks). The
+        // carried fixtures are gitignored: a carried file that is NOT ignored
+        // would count as untracked and trip sync's dirty pre-flight, exactly
+        // like a hand-created one.
+        const registerWithCarry = async (
+            names: string[],
+            carry: string[],
+            hooks?: Record<string, string>
+        ): Promise<void> => {
+            await fsp.writeFile(
+                configPath,
+                `${JSON.stringify(
+                    {
+                        repositories: names.map(
+                            (n) => `https://github.com/acme/${n}.git`
+                        ),
+                        carry,
+                        ...(hooks ? { hooks } : {})
+                    },
+                    null,
+                    4
+                )}\n`
+            )
+        }
+
+        // Commit a .gitignore on main (and push it upstream) BEFORE the
+        // worktree opens, so the carried files stay ignored everywhere.
+        const ignore = async (name: string, lines: string[]): Promise<void> => {
+            const dir = path.join(root, "source", name)
+            await fsp.writeFile(
+                path.join(dir, ".gitignore"),
+                `${lines.join("\n")}\n`
+            )
+            await sh(dir, "add", ".gitignore")
+            await sh(dir, "commit", "-m", "ignore local files")
+            await sh(dir, "push", "origin", "main")
+        }
+
+        it("re-copies missing carried files and never overwrites existing ones", async () => {
+            await makeSource("api")
+            await ignore("api", [".env", ".env.local"])
+            await registerWithCarry(["api"], [".env*"])
+            const source = path.join(root, "source", "api")
+            await fsp.writeFile(path.join(source, ".env"), "FROM_SOURCE\n")
+            await fsp.writeFile(path.join(source, ".env.local"), "LOCAL\n")
+            const wt = await openWorktree("api", "alpha")
+            // The worktree is missing .env entirely and carries its own edit
+            // of .env.local — sync must repair the former, keep the latter.
+            await fsp.writeFile(path.join(wt, ".env.local"), "EDITED\n")
+
+            const json = await captureJson<SyncJson>(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false
+                })
+            })
+
+            expect(json.repos).toEqual([{ name: "api", status: "rebased" }])
+            expect(await fsp.readFile(path.join(wt, ".env"), "utf8")).toBe(
+                "FROM_SOURCE\n"
+            )
+            expect(
+                await fsp.readFile(path.join(wt, ".env.local"), "utf8")
+            ).toBe("EDITED\n")
+            expect(json.carry).toEqual([
+                {
+                    repo: "api",
+                    copied: [".env"],
+                    keptExisting: [".env.local"],
+                    skippedTracked: []
+                }
+            ])
+        })
+
+        it("carries BEFORE the post-sync hook fires, so the hook sees the files", async () => {
+            await makeSource("api")
+            await ignore("api", [".env", "env-seen-by-hook"])
+            await registerWithCarry(["api"], [".env"], {
+                "post-sync": "cp .env env-seen-by-hook"
+            })
+            await fsp.writeFile(
+                path.join(root, "source", "api", ".env"),
+                "SECRET=1\n"
+            )
+            const wt = await openWorktree("api", "alpha")
+
+            const json = await captureJson<SyncJson>(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false
+                })
+            })
+
+            expect(json.hooks).toEqual([
+                { event: "post-sync", repo: "api", exit: 0 }
+            ])
+            expect(
+                await fsp.readFile(path.join(wt, "env-seen-by-hook"), "utf8")
+            ).toBe("SECRET=1\n")
         })
     })
 })

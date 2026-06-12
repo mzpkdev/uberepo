@@ -65,7 +65,7 @@ describe("Config", () => {
             const error = await Config.read({ cwd: tmp }).catch((e) => e)
             expect(error).toBeInstanceOf(Error)
             expect((error as Error).message).toBe(
-                `${configPath(tmp)}: "repositories" must be an array of strings`
+                `${configPath(tmp)}: "repositories" must be an array of URL strings or { url, carry } objects`
             )
         })
 
@@ -163,6 +163,119 @@ describe("Config", () => {
             expect(error).toBeInstanceOf(Error)
             expect((error as Error).message).toBe(
                 `${configPath(tmp)}: "hooks" must be an object mapping an event to a command string`
+            )
+        })
+
+        it("reads a workspace-level carry list", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: ["a"],
+                    carry: [".env*", "config/local.json"]
+                })
+            )
+            const config = await Config.read({ cwd: tmp })
+            expect(config).toEqual({
+                repositories: ["a"],
+                carry: [".env*", "config/local.json"]
+            })
+        })
+
+        it("keeps an old manifest with no carry key working unchanged", async () => {
+            await writeConfig(tmp, `{\n    "repositories": ["a"]\n}\n`)
+            const config = await Config.read({ cwd: tmp })
+            expect("carry" in config).toBe(false)
+        })
+
+        it("reads a { url, carry } repository entry alongside plain strings", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: [
+                        "https://github.com/acme/api.git",
+                        {
+                            url: "https://github.com/acme/web.git",
+                            carry: ["certs/*.pem"]
+                        }
+                    ]
+                })
+            )
+            const config = await Config.read({ cwd: tmp })
+            expect(config).toEqual({
+                repositories: [
+                    "https://github.com/acme/api.git",
+                    {
+                        url: "https://github.com/acme/web.git",
+                        carry: ["certs/*.pem"]
+                    }
+                ]
+            })
+        })
+
+        it("rejects a workspace carry that is not an array of non-empty strings", async () => {
+            for (const carry of [".env*", [".env*", 7], [""], ["  "]]) {
+                await writeConfig(
+                    tmp,
+                    JSON.stringify({ repositories: [], carry })
+                )
+                const error = await Config.read({ cwd: tmp }).catch((e) => e)
+                expect(error).toBeInstanceOf(Error)
+                expect((error as Error).message).toBe(
+                    `${configPath(tmp)}: "carry" must be an array of non-empty glob pattern strings`
+                )
+            }
+        })
+
+        it("rejects a repository entry carry that is malformed, naming the repo", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: [
+                        { url: "https://github.com/acme/api.git", carry: "no" }
+                    ]
+                })
+            )
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: "carry" for https://github.com/acme/api.git must be an array of non-empty glob pattern strings`
+            )
+        })
+
+        it("rejects a repository entry that is neither a string nor an object", async () => {
+            await writeConfig(tmp, JSON.stringify({ repositories: [42] }))
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: each "repositories" entry must be a URL string or a { url, carry } object`
+            )
+        })
+
+        it("rejects a repository entry object without a url", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({ repositories: [{ carry: [".env"] }] })
+            )
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: a "repositories" entry object must have a non-empty "url" string`
+            )
+        })
+
+        it("rejects a repository entry object with an unknown key", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: [
+                        { url: "https://x.com/a/b.git", cary: [".env"] }
+                    ]
+                })
+            )
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: a "repositories" entry has an unknown key "cary" — valid keys are url, carry`
             )
         })
     })

@@ -3,7 +3,12 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
-import { Config, TASKS_DIR } from "@/config"
+import {
+    Config,
+    type RepositoryEntry,
+    repositoryUrl,
+    TASKS_DIR
+} from "@/config"
 import {
     currentGh,
     type Gh,
@@ -96,7 +101,8 @@ export default defineCommand({
         // Registered URL per flat name, so a fired hook can surface it as
         // UBEREPO_REPO_URL (mirrors open's map).
         const urlByName = new Map<string, string>()
-        for (const url of config.repositories) {
+        for (const entry of config.repositories) {
+            const url = repositoryUrl(entry)
             urlByName.set(normalizeRepository(url).name, url)
         }
         // One entry per hook that actually ran (pre-ship and post-ship, for
@@ -434,13 +440,13 @@ const fail = (out: ShipRepo, message: string): void => {
 // (matches status). Used as the universe when the task declares no scope, and to
 // intersect a declared scope down to what is actually open.
 const presentRepos = (
-    config: { repositories: string[] },
+    config: { repositories: RepositoryEntry[] },
     root: string,
     task: string
 ): string[] => {
     const names: string[] = []
-    for (const url of config.repositories) {
-        const { name } = normalizeRepository(url)
+    for (const entry of config.repositories) {
+        const { name } = normalizeRepository(repositoryUrl(entry))
         const source = path.join(root, "source", name)
         const dest = worktreePath(root, task, name)
         if (fs.existsSync(source) && fs.existsSync(dest)) {

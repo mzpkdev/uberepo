@@ -1,7 +1,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
-import { Config } from "@/config"
+import { Config, repositoryUrl } from "@/config"
 import git from "@/git"
 import { normalizeRepository } from "@/url"
 
@@ -28,8 +28,8 @@ export default defineCommand({
         let cloned = 0
         const repos: PullRepo[] = []
 
-        for (const url of config.repositories) {
-            const { name } = normalizeRepository(url)
+        for (const entry of config.repositories) {
+            const { name } = normalizeRepository(repositoryUrl(entry))
             const source = path.join(root, "source", name)
 
             // A repo participates only when it is cloned (source/<name>);

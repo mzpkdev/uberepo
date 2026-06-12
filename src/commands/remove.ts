@@ -1,6 +1,6 @@
 import { defineCommand, terminal } from "cmdore"
 import { repository } from "@/arguments/repository"
-import { CONFIG_FILENAME, Config } from "@/config"
+import { CONFIG_FILENAME, Config, repositoryUrl } from "@/config"
 import { normalizeRepository } from "@/url"
 
 export default defineCommand({
@@ -12,7 +12,7 @@ export default defineCommand({
         const { key } = normalizeRepository(argv.repository)
 
         const present = config.repositories.some(
-            (r) => normalizeRepository(r).key === key
+            (r) => normalizeRepository(repositoryUrl(r)).key === key
         )
         if (!present) {
             // JSON mirrors the no-op outcome: nothing removed, the key reported
@@ -27,7 +27,7 @@ export default defineCommand({
 
         await Config.edit((draft) => {
             draft.repositories = draft.repositories.filter(
-                (r) => normalizeRepository(r).key !== key
+                (r) => normalizeRepository(repositoryUrl(r)).key !== key
             )
         })
         terminal.json({ removed: [key], notFound: [] })

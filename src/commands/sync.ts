@@ -2,7 +2,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
-import { Config } from "@/config"
+import { type CarryEntry, runCarry } from "@/carry"
+import { Config, repositoryUrl } from "@/config"
 import git from "@/git"
 import { type HookResult, runHook } from "@/hooks"
 import { from } from "@/options/from"
@@ -41,7 +42,8 @@ export default defineCommand({
             source: string
             dest: string
         }[] = []
-        for (const url of config.repositories) {
+        for (const entry of config.repositories) {
+            const url = repositoryUrl(entry)
             const { name } = normalizeRepository(url)
             const source = path.join(root, "source", name)
             const dest = worktreePath(root, argv.task, name)
@@ -73,7 +75,13 @@ export default defineCommand({
         let onto = argv.from ?? ""
 
         if (targets.length === 0) {
-            terminal.json({ task: argv.task, onto, repos: [], hooks: [] })
+            terminal.json({
+                task: argv.task,
+                onto,
+                repos: [],
+                hooks: [],
+                carry: []
+            })
             terminal.warn(`No open task ${argv.task} to sync.`)
             return
         }
@@ -98,7 +106,7 @@ export default defineCommand({
             }
             // Nothing was rebased: dirty repos are skipped for that reason, the
             // clean ones were never reached (the pre-flight bailed first). No
-            // worktree was rebased, so no post-sync hook ran.
+            // worktree was rebased, so no post-sync hook or carry ran.
             const repos: SyncRepo[] = targets.map((target) =>
                 dirty.has(target.name)
                     ? {
@@ -112,7 +120,13 @@ export default defineCommand({
                           reason: "not reached"
                       }
             )
-            terminal.json({ task: argv.task, onto, repos, hooks: [] })
+            terminal.json({
+                task: argv.task,
+                onto,
+                repos,
+                hooks: [],
+                carry: []
+            })
             return
         }
 
@@ -128,10 +142,16 @@ export default defineCommand({
         // without aborting the remaining repos.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
+        // One entry per repo whose carry actually ran (a cleanly-rebased repo
+        // with carry patterns). The never-overwrite rule makes this re-run a
+        // missing-files-only repair: existing worktree files are kept, only
+        // matches that vanished (or appeared in source since open) are copied.
+        const carry: CarryEntry[] = []
         // Mark every target the sequential run never reached as skipped, append
         // them to the per-repo outcomes, and emit the JSON for an early return.
-        // Carries the hooks that did fire (for the cleanly-rebased repos before
-        // the stop), keeping the hooks contract on every exit path.
+        // Carries the hooks and carry results that did land (for the
+        // cleanly-rebased repos before the stop), keeping both contracts on
+        // every exit path.
         const emitStopped = (): void => {
             const reached = new Set(repos.map((r) => r.name))
             for (const target of targets) {
@@ -143,7 +163,7 @@ export default defineCommand({
                     })
                 }
             }
-            terminal.json({ task: argv.task, onto, repos, hooks })
+            terminal.json({ task: argv.task, onto, repos, hooks, carry })
         }
         for (const target of targets) {
             const { name, url, source, dest } = target
@@ -217,6 +237,18 @@ export default defineCommand({
             repos.push({ name, status: "rebased" })
             synced += 1
             terminal.log(`${name}: synced`)
+            // Re-carry the configured untracked local files BEFORE post-sync
+            // fires, mirroring open's ordering: existing files are never
+            // overwritten, so this only fills in what the worktree is missing.
+            const carried = await runCarry({
+                config,
+                name,
+                source,
+                worktree: dest
+            })
+            if (carried) {
+                carry.push({ repo: name, ...carried })
+            }
             // post-sync fires for the cleanly-rebased worktree only, with cwd =
             // the worktree and branch = task/<task>. A hook failure is recorded
             // and the loop continues — the rebase already landed.
@@ -235,7 +267,7 @@ export default defineCommand({
             }
         }
 
-        terminal.json({ task: argv.task, onto, repos, hooks })
+        terminal.json({ task: argv.task, onto, repos, hooks, carry })
         terminal.log(
             `Synced task ${argv.task} in ${synced} ${
                 synced === 1 ? "repository" : "repositories"
