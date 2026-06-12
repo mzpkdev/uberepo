@@ -21,6 +21,28 @@ const run = async (
     }
 }
 
+// True when dotted version `version` is at least `minimum`, comparing segment
+// by numeric segment (so "2.40" >= "2.9" and "10.0" >= "9.9"). A missing
+// segment reads as 0 ("2.38" == "2.38.0"); a non-numeric segment reads as 0
+// too, so a garbled version string fails an honest minimum rather than passing.
+export const versionAtLeast = (version: string, minimum: string): boolean => {
+    const parse = (v: string): number[] =>
+        v.split(".").map((segment) => {
+            const n = Number.parseInt(segment, 10)
+            return Number.isNaN(n) ? 0 : n
+        })
+    const a = parse(version)
+    const b = parse(minimum)
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        const left = a[i] ?? 0
+        const right = b[i] ?? 0
+        if (left !== right) {
+            return left > right
+        }
+    }
+    return true
+}
+
 export class GitError extends Error {
     constructor(
         readonly args: string[],
@@ -103,6 +125,23 @@ export class Repository {
         await run(["branch", opts?.force ? "-D" : "-d", branch], this.path)
     }
 
+    // True when the local branch exists. `--verify --quiet` makes a missing
+    // ref a silent exit 1 (a GitError here), and the full refs/heads/ form
+    // keeps a same-named file or tag from satisfying the check.
+    async branchExists(branch: string): Promise<boolean> {
+        try {
+            await this.raw(
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                `refs/heads/${branch}`
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // True when `branch` is an ancestor of `into` (i.e. fully merged into it).
     // `git merge-base --is-ancestor` signals the answer purely through its exit
     // code — 0 for yes, 1 for no — so 1 must be read as a clean `false` rather
@@ -120,6 +159,53 @@ export class Repository {
             }
             throw new GitError(
                 ["merge-base", "--is-ancestor", branch, into],
+                typeof err.code === "number" ? err.code : 1,
+                err.stderr ?? ""
+            )
+        }
+    }
+
+    // Forecast a 3-way merge of the `target` and `branch` TIPS without touching
+    // any worktree or index (`git merge-tree --write-tree`, git >= 2.38 — gate
+    // on git.version() before calling). Exit 0 = mergeable. Exit 1 with the
+    // toplevel tree oid leading stdout = conflicts, whose paths are parsed
+    // from the lines that follow (with --name-only: one conflicted path per
+    // line until the blank line that opens the informational section). Exit 1
+    // lands in the catch — exec treats any non-zero exit as a rejection — and
+    // carries the payload on err.stdout, which is why this can't ride raw()
+    // (GitError keeps stderr only). Everything else is a real GitError —
+    // including an exit 1 WITHOUT a tree oid, which is how git reports an
+    // unmergeable ref ("not something we can merge"), not a conflict. NOTE:
+    // this merges tips in ONE step; a rebase replays commits one-by-one, so
+    // the forecast can differ from reality on multi-commit branches.
+    async mergeTree(
+        target: string,
+        branch: string
+    ): Promise<{ conflicts: string[] }> {
+        const args = ["merge-tree", "--write-tree", "--name-only"]
+        try {
+            await exec("git", [...args, target, branch], { cwd: this.path })
+            return { conflicts: [] }
+        } catch (error) {
+            const err = error as {
+                code?: number
+                stdout?: string
+                stderr?: string
+            }
+            const [oid, ...rest] = (err.stdout ?? "").split("\n")
+            if (err.code === 1 && /^[0-9a-f]{40,64}$/.test(oid ?? "")) {
+                const conflicts = new Set<string>()
+                for (const line of rest) {
+                    // The blank section break ends the conflicted-file list.
+                    if (line === "") {
+                        break
+                    }
+                    conflicts.add(line)
+                }
+                return { conflicts: [...conflicts] }
+            }
+            throw new GitError(
+                [...args, target, branch],
                 typeof err.code === "number" ? err.code : 1,
                 err.stderr ?? ""
             )
@@ -239,6 +325,15 @@ export class Worktree {
 }
 
 const git = (path: string): Repository => new Repository(path)
+// The installed git's version as a dotted string (e.g. "2.49.0"), parsed out
+// of `git version` ("git version 2.39.5 (Apple Git-154)" → "2.39.5"). Falls
+// back to the raw trimmed output when nothing parses, so a caller's gate fails
+// loudly with what git actually said. A property on the default export (like
+// git.clone) so specs can pin the version a feature gate sees via vi.spyOn.
+git.version = async (): Promise<string> => {
+    const out = await run(["version"], process.cwd())
+    return /(\d+(?:\.\d+)*)/.exec(out)?.[1] ?? out.trim()
+}
 git.clone = async (url: string, dest: string): Promise<Repository> => {
     // Fail fast on missing credentials instead of hanging on an interactive
     // password / host-key prompt.

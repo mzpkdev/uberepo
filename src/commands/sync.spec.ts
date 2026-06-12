@@ -8,6 +8,7 @@ import { terminal } from "cmdore"
 import { vi } from "vitest"
 import sync from "@/commands/sync"
 import { CONFIG_FILENAME } from "@/config"
+import git from "@/git"
 
 const exec = promisify(execFile)
 
@@ -273,7 +274,8 @@ describe("sync command", () => {
             await sync.run({
                 task: "alpha",
                 from: undefined,
-                "no-hooks": false
+                "no-hooks": false,
+                check: false
             })
         })
 
@@ -312,7 +314,8 @@ describe("sync command", () => {
             await sync.run({
                 task: "alpha",
                 from: undefined,
-                "no-hooks": false
+                "no-hooks": false,
+                check: false
             })
         })
 
@@ -358,7 +361,8 @@ describe("sync command", () => {
             await sync.run({
                 task: "alpha",
                 from: "feature",
-                "no-hooks": false
+                "no-hooks": false,
+                check: false
             })
         })
 
@@ -390,7 +394,8 @@ describe("sync command", () => {
             await sync.run({
                 task: "alpha",
                 from: undefined,
-                "no-hooks": false
+                "no-hooks": false,
+                check: false
             })
         })
 
@@ -436,7 +441,8 @@ describe("sync command", () => {
             await sync.run({
                 task: "alpha",
                 from: undefined,
-                "no-hooks": false
+                "no-hooks": false,
+                check: false
             })
         })
 
@@ -474,7 +480,8 @@ describe("sync command", () => {
             await sync.run({
                 task: "alpha",
                 from: undefined,
-                "no-hooks": false
+                "no-hooks": false,
+                check: false
             })
         })
 
@@ -499,7 +506,8 @@ describe("sync command", () => {
             await sync.run({
                 task: "ghost",
                 from: undefined,
-                "no-hooks": false
+                "no-hooks": false,
+                check: false
             })
         })
 
@@ -520,7 +528,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             } catch (e) {
                 error = e
@@ -567,7 +576,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
             expect(json).toEqual({
@@ -603,7 +613,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
             expect(json).toEqual({
@@ -633,7 +644,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
             // onto stays empty: the pre-flight bailed before any repo resolved.
@@ -665,7 +677,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: "main",
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
             expect(json.onto).toBe("main")
@@ -680,7 +693,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "ghost",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
             expect(json).toEqual({
@@ -722,7 +736,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
             // api: rebased + hook ran; web: conflict + no hook.
@@ -746,7 +761,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": true
+                    "no-hooks": true,
+                    check: false
                 })
             })
             // Rebased, but the hook was suppressed.
@@ -777,7 +793,8 @@ describe("sync command", () => {
                     await sync.run({
                         task: "alpha",
                         from: undefined,
-                        "no-hooks": false
+                        "no-hooks": false,
+                        check: false
                     })
                 })
                 expect(process.exitCode).toBe(1)
@@ -820,7 +837,8 @@ describe("sync command", () => {
                     await sync.run({
                         task: "alpha",
                         from: undefined,
-                        "no-hooks": false
+                        "no-hooks": false,
+                        check: false
                     })
                 })
                 expect(process.exitCode).toBe(1)
@@ -901,7 +919,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
 
@@ -938,7 +957,8 @@ describe("sync command", () => {
                 await sync.run({
                     task: "alpha",
                     from: undefined,
-                    "no-hooks": false
+                    "no-hooks": false,
+                    check: false
                 })
             })
 
@@ -948,6 +968,354 @@ describe("sync command", () => {
             expect(
                 await fsp.readFile(path.join(wt, "env-seen-by-hook"), "utf8")
             ).toBe("SECRET=1\n")
+        })
+    })
+
+    type CheckJson = {
+        task: string
+        onto: string
+        check: boolean
+        repos: {
+            name: string
+            status: string
+            files?: string[]
+            reason?: string
+        }[]
+    }
+
+    describe("--check", () => {
+        // Run sync in forecast mode against `task` and return its JSON.
+        const runCheck = (task: string, from?: string): Promise<CheckJson> =>
+            captureJson<CheckJson>(async () => {
+                await sync.run({
+                    task,
+                    from,
+                    "no-hooks": false,
+                    check: true
+                })
+            })
+
+        // Give a task branch a local commit so the tips actually diverge.
+        const commitWork = async (
+            wt: string,
+            file = "work.txt",
+            contents = "work\n"
+        ): Promise<void> => {
+            await fsp.writeFile(path.join(wt, file), contents)
+            await sh(wt, "add", file)
+            await sh(wt, "commit", "-m", `task work: ${file}`)
+        }
+
+        it("forecasts clean, fetches, and mutates nothing else — no rebase, no hooks", async () => {
+            await makeSource("api")
+            // Hooks are registered but must NOT fire: a forecast is not the
+            // lifecycle op.
+            await registerWithHooks(["api"], {
+                "pre-sync": "touch pre-hooked",
+                "post-sync": "touch post-hooked"
+            })
+            const wt = await openWorktree("api", "alpha")
+            await commitWork(wt)
+            const before = await branchSha("api", "alpha")
+            const tip = await advanceUpstream("api", "upstream.txt", "up\n")
+
+            const json = await runCheck("alpha")
+
+            expect(json).toEqual({
+                task: "alpha",
+                onto: "origin/main",
+                check: true,
+                repos: [{ name: "api", status: "clean" }]
+            })
+            const source = path.join(root, "source", "api")
+            // The forecast DID fetch: origin/main now points at the new tip...
+            expect(await sh(source, "rev-parse", "origin/main")).toBe(tip)
+            // ...but nothing was rebased: branch tip unchanged, upstream work
+            // not folded in, no rebase left in progress.
+            expect(await branchSha("api", "alpha")).toBe(before)
+            expect(await reachable("api", "alpha", tip)).toBe(false)
+            expect(await rebaseInProgress(wt)).toBe(false)
+            // And neither hook fired.
+            expect(fs.existsSync(path.join(wt, "pre-hooked"))).toBe(false)
+            expect(fs.existsSync(path.join(wt, "post-hooked"))).toBe(false)
+        })
+
+        it("forecasts conflicts with the conflicting files, leaving the worktree untouched and exiting 0", async () => {
+            await makeSource("api")
+            await register(["api"])
+            const wt = await openWorktree("api", "alpha")
+            // Upstream and the task branch edit the same line of README.md.
+            await advanceUpstream("api", "README.md", "from upstream\n")
+            await commitWork(wt, "README.md", "from task\n")
+            const before = await branchSha("api", "alpha")
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: CheckJson
+            try {
+                json = await runCheck("alpha")
+                // A forecast that finds conflicts did its job — exit stays 0.
+                expect(process.exitCode).toBeUndefined()
+            } finally {
+                process.exitCode = previousExit
+            }
+
+            expect(json).toEqual({
+                task: "alpha",
+                onto: "origin/main",
+                check: true,
+                repos: [
+                    {
+                        name: "api",
+                        status: "conflicts",
+                        files: ["README.md"]
+                    }
+                ]
+            })
+            // Forecast only: no mid-rebase state, branch tip unchanged.
+            expect(await rebaseInProgress(wt)).toBe(false)
+            expect(await branchSha("api", "alpha")).toBe(before)
+
+            // The human view: a forecast heading, the status line, and the
+            // conflicting file indented beneath it.
+            const { logs } = await captureOutput(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: true
+                })
+            })
+            expect(logs[0]).toBe("alpha  vs origin/main  (forecast)")
+            expect(logs[1]).toContain("api")
+            expect(logs[1]).toContain("conflicts — 1 likely conflicted file")
+            expect(logs[2]).toBe("    README.md")
+        })
+
+        it("reports current when the target brought nothing new — even with local commits", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            await openWorktree("api", "alpha")
+            const webWt = await openWorktree("web", "alpha")
+            // api: branch == origin/main exactly. web: local commits, upstream
+            // quiet — the target is already contained, a rebase would no-op.
+            await commitWork(webWt)
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([
+                { name: "api", status: "current" },
+                { name: "web", status: "current" }
+            ])
+        })
+
+        it("reports clean (not current) when sync would fast-forward a branch with no own commits", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await openWorktree("api", "alpha")
+            // Upstream advanced, the task branch carries nothing of its own:
+            // sync WOULD move the branch (a fast-forward), so this is not
+            // "current" — it is a conflict-free rebase.
+            await advanceUpstream("api", "upstream.txt", "up\n")
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([{ name: "api", status: "clean" }])
+        })
+
+        it("never refuses: flags the dirty repo (with its tip-level conflicts) and still forecasts the rest", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            const apiWt = await openWorktree("api", "alpha")
+            const webWt = await openWorktree("web", "alpha")
+            // api: committed conflict at the tips PLUS uncommitted noise on
+            // top — real sync would refuse the whole run here.
+            await advanceUpstream("api", "README.md", "from upstream\n")
+            await commitWork(apiWt, "README.md", "from task\n")
+            await fsp.writeFile(path.join(apiWt, "noise.txt"), "uncommitted\n")
+            // web: clean divergence.
+            await commitWork(webWt)
+            await advanceUpstream("web", "upstream.txt", "up\n")
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([
+                // dirty wins the status; the tip-level forecast still ran and
+                // carries what the rebase would hit once committed/stashed.
+                { name: "api", status: "dirty", files: ["README.md"] },
+                { name: "web", status: "clean" }
+            ])
+        })
+
+        it("flags a dirty repo without conflicts as dirty alone (no files key)", async () => {
+            await makeSource("api")
+            await register(["api"])
+            const wt = await openWorktree("api", "alpha")
+            await fsp.writeFile(path.join(wt, "noise.txt"), "uncommitted\n")
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([{ name: "api", status: "dirty" }])
+
+            const { logs } = await captureOutput(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: true
+                })
+            })
+            expect(logs.find((l) => l.includes("api"))).toContain(
+                "dirty — uncommitted changes; sync would refuse"
+            )
+        })
+
+        it("reports a scoped repo with no worktree as skipped, like diff", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            await openWorktree("api", "alpha")
+            // web is in the scope but was never opened.
+            await writeScope("alpha", ["api", "web"])
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([
+                { name: "api", status: "current" },
+                { name: "web", status: "skipped", reason: "no worktree" }
+            ])
+        })
+
+        it("warns about a stray worktree outside the scope and leaves it out of the forecast", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            await openWorktree("api", "alpha")
+            await openWorktree("web", "alpha")
+            await writeScope("alpha", ["api"])
+
+            let json: CheckJson | undefined
+            const { warnings } = await captureOutput(async () => {
+                json = await runCheck("alpha")
+            })
+            expect(json?.repos.map((r) => r.name)).toEqual(["api"])
+            expect(warnings.join("\n")).toContain(
+                "web: worktree outside task scope"
+            )
+        })
+
+        it("reports a vanished task branch as skipped", async () => {
+            await makeSource("api")
+            await register(["api"])
+            const wt = await openWorktree("api", "alpha")
+            await sh(wt, "checkout", "--detach")
+            await sh(
+                path.join(root, "source", "api"),
+                "branch",
+                "-D",
+                "task/alpha"
+            )
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([
+                { name: "api", status: "skipped", reason: "branch missing" }
+            ])
+        })
+
+        it("skips a repo without a resolvable origin default and CONTINUES — unlike the real sync", async () => {
+            // "api" sorts first, so its skip must not stop web's forecast.
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            await openWorktree("api", "alpha")
+            const webWt = await openWorktree("web", "alpha")
+            await commitWork(webWt)
+            await dropOrigin("api")
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([
+                {
+                    name: "api",
+                    status: "skipped",
+                    reason: "cannot resolve origin's default branch"
+                },
+                { name: "web", status: "current" }
+            ])
+        })
+
+        it("--from forecasts against the given ref and names it as onto", async () => {
+            await makeSource("api")
+            await register(["api"])
+            const wt = await openWorktree("api", "alpha")
+            const source = path.join(root, "source", "api")
+            // A feature branch whose work.txt collides with the task's; the
+            // origin default never moves, so the default forecast is clean.
+            await sh(source, "branch", "feature", "main")
+            await sh(source, "switch", "feature")
+            await fsp.writeFile(path.join(source, "work.txt"), "feature\n")
+            await sh(source, "add", "work.txt")
+            await sh(source, "commit", "-m", "feature work")
+            await sh(source, "switch", "main")
+            await commitWork(wt, "work.txt", "task\n")
+
+            const versus = await runCheck("alpha")
+            expect(versus.onto).toBe("origin/main")
+            // vs the quiet origin default the branch is simply ahead: current.
+            expect(versus.repos).toEqual([{ name: "api", status: "current" }])
+
+            const json = await runCheck("alpha", "feature")
+            expect(json).toEqual({
+                task: "alpha",
+                onto: "feature",
+                check: true,
+                repos: [
+                    {
+                        name: "api",
+                        status: "conflicts",
+                        files: ["work.txt"]
+                    }
+                ]
+            })
+        })
+
+        it("emits empty repos and warns when the task is not open", async () => {
+            await makeSource("api")
+            await register(["api"])
+
+            let json: CheckJson | undefined
+            const { warnings } = await captureOutput(async () => {
+                json = await runCheck("ghost")
+            })
+            expect(json).toEqual({
+                task: "ghost",
+                onto: "",
+                check: true,
+                repos: []
+            })
+            expect(warnings.join("\n")).toContain("ghost")
+        })
+
+        it("errors up front on git older than 2.38 instead of degrading", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await openWorktree("api", "alpha")
+            vi.spyOn(git, "version").mockResolvedValue("2.37.2")
+
+            await expect(
+                sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: true
+                })
+            ).rejects.toThrow("sync --check needs git >= 2.38, found 2.37.2")
+        })
+
+        it("passes the gate exactly at 2.38", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await openWorktree("api", "alpha")
+            vi.spyOn(git, "version").mockResolvedValue("2.38.0")
+
+            const json = await runCheck("alpha")
+            expect(json.repos).toEqual([{ name: "api", status: "current" }])
         })
     })
 })

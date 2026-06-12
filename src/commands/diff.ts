@@ -126,7 +126,7 @@ export default defineCommand({
             // The task branch can vanish while its worktree dir lingers (a
             // detached worktree whose branch was deleted) — report, never
             // crash the cross-repo run.
-            if (!(await branchExists(repo, branch))) {
+            if (!(await repo.branchExists(branch))) {
                 repos.push({
                     name,
                     branch,
@@ -169,26 +169,6 @@ export default defineCommand({
         print(argv.task, base, repos)
     }
 })
-
-// True when the local branch exists. `--verify --quiet` makes a missing ref a
-// silent exit 1 (a GitError here), and the full refs/heads/ form keeps a
-// same-named file or tag from satisfying the check.
-const branchExists = async (
-    repo: ReturnType<typeof git>,
-    branch: string
-): Promise<boolean> => {
-    try {
-        await repo.raw(
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            `refs/heads/${branch}`
-        )
-        return true
-    } catch {
-        return false
-    }
-}
 
 // The commits on `branch` not reachable from `base` (`git log base..branch`,
 // i.e. everything past the merge-base), newest first. %x00 separates sha from

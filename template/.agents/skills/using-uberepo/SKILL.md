@@ -48,6 +48,8 @@ across them at once and switch tasks by switching directories — not `git check
      uberepo does NOT commit or push. Follow each repo's own AGENTS.md/README.
    - `uberepo sync <task>` — rebase each worktree onto its fresh default branch.
      Refuses a dirty worktree; stops on conflict and leaves that repo mid-rebase.
+     `--check` forecasts all that first, per repo (fetch only — no rebase, no
+     hooks), so run it when you want to see the conflicts before hitting them.
    - `uberepo ship <task>` — push each repo's branch and open a **draft** PR per
      repo. Needs the GitHub CLI (`gh`) unless `--no-pr`. `--title`/`--body`
      override; otherwise title = goal's first line, body = the repo's `.github` PR

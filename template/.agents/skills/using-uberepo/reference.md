@@ -84,6 +84,16 @@ Fetches and rebases each worktree onto its repo's fresh default branch.
 - **Stops on conflict**: leaves that repo mid-rebase. Resolve it in that
   worktree (`git add` the resolved files, `git rebase --continue`), then re-run
   `uberepo sync <task>` to carry on with the remaining repos.
+- `--check` — a conflict **forecast**: fetch (the one ref update), then predict
+  each repo's rebase with `git merge-tree` — no rebase, no hooks, no carry, no
+  worktree mutation. Per repo: `current` (the target is already contained —
+  sync would no-op), `clean` (rebase likely clean), `conflicts` (+ the likely
+  conflicted files), `dirty` (uncommitted changes — the real sync would refuse;
+  `--check` never refuses, it flags the repo and keeps forecasting the rest),
+  `skipped` (+ reason). It's a forecast, not a promise: merge-tree merges the
+  two tips in one step while a real rebase replays commits one-by-one, so a
+  multi-commit branch can differ. Exits 0 even when conflicts are forecast.
+  Needs git >= 2.38.
 
 ### `uberepo ship <task>` — push + open a draft PR per repo
 
@@ -321,6 +331,7 @@ Optional keys (`reason`, `error`, `note`) are omitted when they don't apply.
 | `diff` | `{ task, base, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
 | `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`; `hooks` lists every hook that ran (pre and post); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
 | `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
+| `sync --check` | `{ task, onto, check: true, repos: [{ name, status: "clean" \| "conflicts" \| "current" \| "dirty" \| "skipped", files?, reason? }] }` — a forecast: nothing was rebased, no hooks/carry keys; `files` (string[]) lists the likely-conflicted paths when merge-tree hit conflicts (also present on a `dirty` repo whose committed tips would conflict); `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"`, or the per-repo error; exits 0 even when conflicts are forecast |
 | `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |
 | `close` | `{ task, forced: bool, repos: [{ name, status: "closed" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, modified }] }` — `reason`: `"uncommitted changes"`, `"unmerged commits"`, `"pre-close hook failed"`; `carry` lists carried files modified inside the task (warn-only — their edits are lost with the worktree) |
 | `prune` | `{ forced: bool, tasks: [{ task, status: "pruned" \| "kept", reason? }] }` — `reason`: `"dirty"`, `"unmerged"`, or the failure message; when `forced` is false a `"pruned"` status means a preview candidate (nothing removed yet) |

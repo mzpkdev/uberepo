@@ -3,9 +3,10 @@ import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
 import { type CarryEntry, runCarry } from "@/carry"
-import { Config, repositoryUrl } from "@/config"
-import git from "@/git"
+import { Config, repositoryUrl, type UberepoConfig } from "@/config"
+import git, { versionAtLeast } from "@/git"
 import { type HookResult, runHook } from "@/hooks"
+import { check } from "@/options/check"
 import { from } from "@/options/from"
 import { noHooks } from "@/options/no-hooks"
 import { partitionScope, taskBranch, taskScope, worktreePath } from "@/tasks"
@@ -22,15 +23,42 @@ type SyncRepo = {
     reason?: string
 }
 
+// One repo's forecast under --check — what a real sync would LIKELY hit, read
+// off the committed tips. `current` = the rebase target is already contained
+// in the task branch, so the rebase would no-op; `clean` = merge-tree of the
+// two tips reports no conflict (likely, not promised: a rebase replays commits
+// one-by-one, merge-tree merges the tips once, so multi-commit branches can
+// differ); `conflicts` = merge-tree conflicts, with the conflicted paths in
+// `files`; `dirty` = uncommitted changes — the one thing the real sync refuses
+// outright — flagged per repo while the tip-level forecast still runs, so
+// `files` appears when the rebase would ALSO conflict after a commit/stash;
+// `skipped` = nothing to forecast, `reason` mirroring diff's strings (no
+// worktree, branch missing, an unresolvable origin default) or the per-repo
+// error (e.g. a failed fetch).
+type CheckRepo = {
+    name: string
+    status: "clean" | "conflicts" | "current" | "dirty" | "skipped"
+    files?: string[]
+    reason?: string
+}
+
 export default defineCommand({
     name: "sync",
     description: "Sync an open task's worktrees with their upstream branches",
     arguments: [task],
-    options: [from, noHooks],
+    options: [from, noHooks, check],
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
         const branch = taskBranch(argv.task)
+
+        // --check forks off before any sync machinery: it shares the scope
+        // resolution and target semantics but mutates nothing (beyond a fetch)
+        // and fires no hooks — a forecast is not the lifecycle op.
+        if (argv.check) {
+            await forecast(root, config, argv.task, branch, argv.from)
+            return
+        }
 
         // The task's worktrees across cloned repos: a repo participates only
         // when it is both cloned (source/<name>) and has this task's worktree.
@@ -289,3 +317,191 @@ export default defineCommand({
         }
     }
 })
+
+// `sync --check`: a per-repo conflict FORECAST of what the real sync would
+// hit, touching nothing but the remote-tracking refs. Each repo is fetched
+// first (the one mutation-adjacent step — a forecast against stale refs is a
+// lie), the rebase target resolves exactly like sync (--from wins, else
+// origin's default), then `git merge-tree --write-tree` judges the tips. No
+// rebase, no carry, no worktree mutation, and no hooks. Unlike the real sync
+// it NEVER refuses and never stops early: a dirty worktree is flagged per repo
+// instead of vetoing the run (that's the point of a pre-flight), a skip moves
+// on to the next repo, and — like diff, unlike sync — a scoped repo MISSING
+// its worktree still gets a line. Exits 0 even when conflicts are forecast:
+// finding them is the job (the prune-preview convention).
+const forecast = async (
+    root: string,
+    config: UberepoConfig,
+    task: string,
+    branch: string,
+    from: string | undefined
+): Promise<void> => {
+    // merge-tree --write-tree landed in git 2.38 — gate up front with an
+    // actionable error rather than degrading into raw git noise per repo.
+    const version = await git.version()
+    if (!versionAtLeast(version, "2.38")) {
+        throw new Error(`sync --check needs git >= 2.38, found ${version}`)
+    }
+
+    // The repos that can be forecast: registered AND cloned AND holding this
+    // task's worktree, in stable sorted order (matches diff/status/ship).
+    const present: string[] = []
+    for (const entry of config.repositories) {
+        const { name } = normalizeRepository(repositoryUrl(entry))
+        const source = path.join(root, "source", name)
+        const dest = worktreePath(root, task, name)
+        if (fs.existsSync(source) && fs.existsSync(dest)) {
+            present.push(name)
+        }
+    }
+    present.sort()
+
+    // Honour the task's declared scope the way sync does (warn about strays,
+    // act on the in-scope intersection), but report like diff: a scoped repo
+    // with no worktree is a `skipped` line, not a silent omission — the
+    // pre-flight should say "nothing to sync here", not hide the repo.
+    const scope = await taskScope(root, task)
+    const { inScope, strays } = partitionScope(present, scope)
+    for (const name of strays) {
+        terminal.warn(
+            `${name}: worktree outside task scope (not in repos:) — skipping; close it or add it with open --repos`
+        )
+    }
+    const missing = scope.filter((name) => !present.includes(name))
+    const targets = [...new Set([...inScope, ...missing])].sort()
+
+    // The forecast's rebase target, reported in the JSON exactly like sync's
+    // `onto`: an explicit --from wins; otherwise the first resolved origin
+    // default names the run. Empty until then.
+    let onto = from ?? ""
+
+    if (targets.length === 0) {
+        terminal.json({ task, onto, check: true, repos: [] })
+        terminal.warn(`No open task ${task} to sync.`)
+        return
+    }
+
+    const repos: CheckRepo[] = []
+    for (const name of targets) {
+        const source = path.join(root, "source", name)
+        const dest = worktreePath(root, task, name)
+        if (!present.includes(name)) {
+            repos.push({ name, status: "skipped", reason: "no worktree" })
+            continue
+        }
+        const repo = git(source)
+
+        // Resolve before fetching, the same order as sync: a missing or
+        // unconfigured origin reads as a clean skip, never a raw fetch error.
+        const resolved = from ?? (await repo.remoteDefault())
+        if (!resolved) {
+            repos.push({
+                name,
+                status: "skipped",
+                reason: "cannot resolve origin's default branch"
+            })
+            continue
+        }
+        if (onto === "") {
+            onto = resolved
+        }
+
+        try {
+            // The same fetch sync performs before rebasing, so the forecast
+            // judges the freshest upstream — its only ref mutation.
+            await repo.fetch()
+
+            // The task branch can vanish while its worktree dir lingers —
+            // report, never crash the cross-repo run (mirrors diff).
+            if (!(await repo.branchExists(branch))) {
+                repos.push({
+                    name,
+                    status: "skipped",
+                    reason: "branch missing"
+                })
+                continue
+            }
+
+            const dirty = await repo.worktree(dest).dirty()
+            // Already up to date: the target is contained in the task branch,
+            // so the rebase would no-op — nothing can conflict, skip the
+            // merge-tree question entirely.
+            const current = await repo.isMerged(resolved, branch)
+            const conflicts = current
+                ? []
+                : (await repo.mergeTree(resolved, branch)).conflicts
+            const status: CheckRepo["status"] = dirty
+                ? "dirty"
+                : current
+                  ? "current"
+                  : conflicts.length > 0
+                    ? "conflicts"
+                    : "clean"
+            // Spread keeps `files` off the object entirely when empty, so the
+            // key only appears when there is a conflict list to act on.
+            repos.push({
+                name,
+                status,
+                ...(conflicts.length > 0 ? { files: conflicts } : {})
+            })
+        } catch (error) {
+            // Safety net (mirrors diff): one repo's failure — an offline
+            // fetch, unrelated histories — becomes a skip, never an abort of
+            // the whole forecast.
+            repos.push({
+                name,
+                status: "skipped",
+                reason: error instanceof Error ? error.message : String(error)
+            })
+        }
+    }
+
+    terminal.json({ task, onto, check: true, repos })
+    printForecast(task, onto, repos)
+}
+
+// Print the forecast heading ("<task>  vs <onto>  (forecast)" once a target
+// resolved) followed by one aligned line per repo — the JSON status verbatim,
+// an em-dash detail spelling out what it means for the real sync — with the
+// likely-conflicted files indented beneath conflicted (and dirty-and-
+// conflicted) repos. "likely" is deliberate: merge-tree forecasts, it doesn't
+// promise.
+const printForecast = (
+    task: string,
+    onto: string,
+    repos: CheckRepo[]
+): void => {
+    terminal.log(
+        onto === "" ? `${task}  (forecast)` : `${task}  vs ${onto}  (forecast)`
+    )
+    const width = repos.reduce((max, r) => Math.max(max, r.name.length), 0)
+    for (const repo of repos) {
+        const name = repo.name.padEnd(width)
+        if (repo.status === "skipped") {
+            terminal.log(`  ${name}  skipped — ${repo.reason}`)
+            continue
+        }
+        if (repo.status === "current") {
+            terminal.log(`  ${name}  current — already up to date`)
+            continue
+        }
+        if (repo.status === "clean") {
+            terminal.log(`  ${name}  clean — rebase likely clean`)
+            continue
+        }
+        const files = repo.files ?? []
+        const count = `${files.length} likely conflicted ${
+            files.length === 1 ? "file" : "files"
+        }`
+        terminal.log(
+            repo.status === "dirty"
+                ? `  ${name}  dirty — uncommitted changes; sync would refuse${
+                      files.length > 0 ? `; ${count}` : ""
+                  }`
+                : `  ${name}  conflicts — ${count}`
+        )
+        for (const file of files) {
+            terminal.log(`    ${file}`)
+        }
+    }
+}

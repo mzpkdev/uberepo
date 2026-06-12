@@ -4,7 +4,7 @@ import * as fsp from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
 import { promisify } from "node:util"
-import git, { GitError, Repository, Worktree } from "@/git"
+import git, { GitError, Repository, versionAtLeast, Worktree } from "@/git"
 
 const exec = promisify(execFile)
 
@@ -74,6 +74,24 @@ describe("Worktree.parse", () => {
         expect(bare.bare).toBe(true)
         expect(bare.branch).toBeUndefined()
         expect(bare.detached).toBe(false)
+    })
+})
+
+describe("versionAtLeast", () => {
+    it("compares segment by numeric segment, not lexicographically", () => {
+        expect(versionAtLeast("2.38.0", "2.38")).toBe(true)
+        expect(versionAtLeast("2.38", "2.38.0")).toBe(true)
+        expect(versionAtLeast("2.37.9", "2.38")).toBe(false)
+        expect(versionAtLeast("2.40", "2.9")).toBe(true)
+        expect(versionAtLeast("10.0", "9.9")).toBe(true)
+        expect(versionAtLeast("2.39.5", "2.38")).toBe(true)
+        expect(versionAtLeast("3.0", "2.38")).toBe(true)
+        expect(versionAtLeast("1.9.9", "2.38")).toBe(false)
+    })
+
+    it("reads a garbled version as 0, failing an honest minimum", () => {
+        expect(versionAtLeast("garbage", "2.38")).toBe(false)
+        expect(versionAtLeast("", "2.38")).toBe(false)
     })
 })
 
@@ -181,6 +199,81 @@ describe("git integration", () => {
 
             const tracked = await sh(repo.path, "rev-parse", "origin/main")
             expect(tracked).toBe(originHead)
+        })
+    })
+
+    describe("git.version", () => {
+        it("resolves the installed git's dotted version string", async () => {
+            const version = await git.version()
+            // Whatever git is installed, the parse must yield bare dotted
+            // numerics (no "git version " prefix, no platform suffix).
+            expect(version).toMatch(/^\d+(\.\d+)+$/)
+        })
+    })
+
+    describe("branchExists", () => {
+        it("answers for refs/heads only — a tag never satisfies it", async () => {
+            const repo = await cloneOrigin()
+            await sh(repo.path, "branch", "topic")
+            await sh(repo.path, "tag", "tagged")
+            expect(await repo.branchExists("main")).toBe(true)
+            expect(await repo.branchExists("topic")).toBe(true)
+            expect(await repo.branchExists("missing")).toBe(false)
+            expect(await repo.branchExists("tagged")).toBe(false)
+        })
+    })
+
+    describe("mergeTree", () => {
+        // A topic branch whose README edit collides with main's, plus a clean
+        // sibling that only adds its own file — both built in the clone.
+        const diverge = async (repo: Repository): Promise<void> => {
+            await sh(repo.path, "switch", "-c", "conflicting", "main")
+            await fsp.writeFile(
+                path.join(repo.path, "README.md"),
+                "from topic\n"
+            )
+            await sh(repo.path, "commit", "-am", "topic edits readme")
+            await sh(repo.path, "switch", "-c", "clean", "main")
+            await fsp.writeFile(path.join(repo.path, "own.txt"), "own\n")
+            await sh(repo.path, "add", "own.txt")
+            await sh(repo.path, "commit", "-m", "clean adds own file")
+            await sh(repo.path, "switch", "main")
+            await fsp.writeFile(
+                path.join(repo.path, "README.md"),
+                "from main\n"
+            )
+            await sh(repo.path, "commit", "-am", "main edits readme")
+        }
+
+        it("reports no conflicts for a mergeable pair of tips", async () => {
+            const repo = await cloneOrigin()
+            await diverge(repo)
+            expect(await repo.mergeTree("main", "clean")).toEqual({
+                conflicts: []
+            })
+        })
+
+        it("reports the conflicted paths for colliding tips, touching no worktree", async () => {
+            const repo = await cloneOrigin()
+            await diverge(repo)
+            const before = await sh(repo.path, "status", "--porcelain")
+            expect(await repo.mergeTree("main", "conflicting")).toEqual({
+                conflicts: ["README.md"]
+            })
+            // Pure forecast: no checkout, no index change, no MERGE_* state.
+            expect(await sh(repo.path, "status", "--porcelain")).toBe(before)
+        })
+
+        it("throws a GitError for an unknown ref instead of misreading it as conflicts", async () => {
+            const repo = await cloneOrigin()
+            // git reports "not something we can merge" with exit 1 and NO tree
+            // oid on stdout — the oid, not the exit code, separates a conflict
+            // payload from a real error.
+            const error = await repo
+                .mergeTree("does-not-exist", "main")
+                .catch((e) => e)
+            expect(error).toBeInstanceOf(GitError)
+            expect((error as GitError).exitCode).not.toBe(0)
         })
     })
 
