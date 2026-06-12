@@ -787,5 +787,52 @@ describe("sync command", () => {
             ])
             expect(fs.existsSync(path.join(webWt, "ok"))).toBe(true)
         })
+
+        it("pre-sync failure skips that repo, continues to the rest, and exits non-zero", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await registerWithHooks(["api", "web"], {
+                // api's gate fails; web's passes and its rebase proceeds.
+                "pre-sync": 'test "$UBEREPO_REPO" != api'
+            })
+            const apiWt = await openWorktree("api", "alpha")
+            const webWt = await openWorktree("web", "alpha")
+            await commitWork(apiWt)
+            await commitWork(webWt)
+            const apiTip = await advanceUpstream("api", "u.txt", "api up\n")
+            const webTip = await advanceUpstream("web", "u.txt", "web up\n")
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: SyncJson
+            try {
+                json = await captureJson<SyncJson>(async () => {
+                    await sync.run({
+                        task: "alpha",
+                        from: undefined,
+                        "no-hooks": false
+                    })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // api's rebase never ran (the gate held, its worktree untouched);
+            // web's did, and the run CONTINUED past the failed gate.
+            expect(json.repos).toEqual([
+                {
+                    name: "api",
+                    status: "skipped",
+                    reason: "pre-sync hook failed"
+                },
+                { name: "web", status: "rebased" }
+            ])
+            expect(json.hooks).toEqual([
+                { event: "pre-sync", repo: "api", exit: 1 },
+                { event: "pre-sync", repo: "web", exit: 0 }
+            ])
+            expect(await reachable("api", "alpha", apiTip)).toBe(false)
+            expect(await reachable("web", "alpha", webTip)).toBe(true)
+        })
     })
 })

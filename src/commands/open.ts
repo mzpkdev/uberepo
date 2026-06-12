@@ -19,10 +19,12 @@ import * as ubertask from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
 // One repo's open outcome: `created` (a fresh worktree landed) or `skipped`
-// (its worktree was already open — the idempotent/recovery path).
+// (its worktree was already open — the idempotent/recovery path — or its
+// pre-open hook failed, with `reason` set on the hook path).
 type OpenRepo = {
     name: string
     status: "created" | "skipped"
+    reason?: string
 }
 
 // The seed ubertask.yml lives in the repo's real template/ dir and is byte-copied
@@ -121,9 +123,10 @@ export default defineCommand({
 
         let opened = 0
         const repos: OpenRepo[] = []
-        // One entry per repo whose post-open hook actually ran (newly-created
-        // worktrees only — never a skip). A non-zero exit is collected and
-        // flips the command's exit code at the end without aborting the rest.
+        // One entry per hook that actually ran (pre-open and post-open, for
+        // worktrees this run actually tried to create — never an already-open
+        // skip). A non-zero exit is collected and flips the command's exit
+        // code at the end without aborting the rest.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
         for (const name of targets) {
@@ -138,6 +141,37 @@ export default defineCommand({
                     `Skipping ${name} — worktree already open at ${relative}`
                 )
                 continue
+            }
+            // pre-open GATES the worktree: a non-zero exit skips this repo (no
+            // worktree is created), the run continues, and the command exits
+            // non-zero at the end. The worktree does not exist yet, so the
+            // hook runs in the repo's source clone while UBEREPO_REPO_PATH
+            // names the would-be worktree.
+            const pre = await runHook("pre-open", {
+                config,
+                workspace: root,
+                task: argv.task,
+                cwd: path.join(root, "source", name),
+                repo: {
+                    name,
+                    path: dest,
+                    url: urlByName.get(name) ?? "",
+                    branch
+                },
+                noHooks: argv["no-hooks"]
+            })
+            if (pre) {
+                hooks.push(pre)
+                if (pre.exit !== 0) {
+                    failedHooks.push(pre)
+                    repos.push({
+                        name,
+                        status: "skipped",
+                        reason: "pre-open hook failed"
+                    })
+                    terminal.log(`Skipping ${name} — pre-open hook failed`)
+                    continue
+                }
             }
             terminal.log(
                 `Opening ${name} → ${relative} (${branch} from ${base})`
@@ -239,12 +273,15 @@ export default defineCommand({
                 opened === 1 ? "repository" : "repositories"
             }`
         )
-        // A failing hook never removes its worktree, but the run is not clean:
+        // A failing post-open never removes its worktree (and a failing
+        // pre-open just left its repo unopened), but the run is not clean:
         // summarise and exit non-zero so a wrapper/CI sees the failure.
         if (failedHooks.length > 0) {
-            const which = failedHooks.map((h) => h.repo).join(", ")
+            const which = failedHooks
+                .map((h) => `${h.repo} (${h.event})`)
+                .join(", ")
             terminal.error(
-                `post-open hook failed in ${failedHooks.length} ${
+                `hooks failed in ${failedHooks.length} ${
                     failedHooks.length === 1 ? "repository" : "repositories"
                 }: ${which}`
             )

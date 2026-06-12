@@ -54,7 +54,10 @@ across them at once and switch tasks by switching directories — not `git check
      uncommitted/unmerged work; `--force` only when the work is saved.
    - **Hooks (optional):** if `uberepo.json` has a `hooks` map, `post-clone` /
      `post-open` / `post-sync` shell commands run per repo after that git op lands
-     (cwd = the repo/worktree; see reference.md). `--no-hooks` skips them.
+     (cwd = the repo/worktree; env + full tables in reference.md). A hook may
+     already have installed deps or copied configs — check before redoing that
+     work. `--no-hooks` skips them for a run; use it when the human asks, not by
+     default.
 3. **For flags, sharing, and refusal-recovery**, read [reference.md](reference.md).
    `uberepo --help` lists every command and flag.
 

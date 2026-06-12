@@ -205,4 +205,48 @@ describe("runHook", () => {
         }
         expect(written.join("")).not.toContain("HELLO")
     })
+
+    it("runs in ctx.cwd when set, keeping UBEREPO_REPO_PATH on repo.path", async () => {
+        const out = path.join(tmp, "out.txt")
+        await quiet(async () => {
+            const result = await runHook("pre-clone", {
+                config: configWith({
+                    "pre-clone": `echo "$PWD|$UBEREPO_REPO_PATH" > "${out}"`
+                }),
+                workspace: tmp,
+                // repo.path names a dir that does NOT exist (the would-be
+                // clone); cwd points the shell somewhere real.
+                cwd: tmp,
+                repo: { name: "api", path: path.join(tmp, "ghost"), url: "u" }
+            })
+            expect(result?.exit).toBe(0)
+        })
+        const line = (await fsp.readFile(out, "utf8")).trim()
+        expect(line).toBe(`${tmp}|${path.join(tmp, "ghost")}`)
+    })
+
+    it("passes UBEREPO_PR_URL when ctx.pr is set, and an empty string otherwise", async () => {
+        const out = path.join(tmp, "pr.txt")
+        await quiet(async () => {
+            await runHook("post-ship", {
+                config: configWith({
+                    "post-ship": `echo "[$UBEREPO_PR_URL]" >> "${out}"`
+                }),
+                workspace: tmp,
+                task: "alpha",
+                pr: "https://github.com/acme/api/pull/7",
+                repo: { name: "api", path: repoPath, url: "u" }
+            })
+            await runHook("post-ship", {
+                config: configWith({
+                    "post-ship": `echo "[$UBEREPO_PR_URL]" >> "${out}"`
+                }),
+                workspace: tmp,
+                task: "alpha",
+                repo: { name: "api", path: repoPath, url: "u" }
+            })
+        })
+        const lines = (await fsp.readFile(out, "utf8")).trim().split("\n")
+        expect(lines).toEqual(["[https://github.com/acme/api/pull/7]", "[]"])
+    })
 })

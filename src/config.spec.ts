@@ -98,6 +98,24 @@ describe("Config", () => {
             })
         })
 
+        it("accepts every pre/post lifecycle event", async () => {
+            const hooks = {
+                "pre-clone": "a",
+                "post-clone": "b",
+                "pre-open": "c",
+                "post-open": "d",
+                "pre-sync": "e",
+                "post-sync": "f",
+                "pre-ship": "g",
+                "post-ship": "h",
+                "pre-close": "i",
+                "post-close": "j"
+            }
+            await writeConfig(tmp, JSON.stringify({ repositories: [], hooks }))
+            const config = await Config.read({ cwd: tmp })
+            expect(config.hooks).toEqual(hooks)
+        })
+
         it("keeps an old manifest with no hooks key working unchanged", async () => {
             await writeConfig(tmp, `{\n    "repositories": ["a", "b"]\n}\n`)
             const config = await Config.read({ cwd: tmp })
@@ -117,7 +135,7 @@ describe("Config", () => {
             const error = await Config.read({ cwd: tmp }).catch((e) => e)
             expect(error).toBeInstanceOf(Error)
             expect((error as Error).message).toBe(
-                `${configPath(tmp)}: "hooks" has an unknown event "pre-commit" — valid events are post-clone, post-open, post-sync`
+                `${configPath(tmp)}: "hooks" has an unknown event "pre-commit" — valid events are pre-clone, post-clone, pre-open, post-open, pre-sync, post-sync, pre-ship, post-ship, pre-close, post-close`
             )
         })
 

@@ -191,7 +191,7 @@ describe("close command", () => {
         await openWorktree("web", "alpha")
 
         const { logs } = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: false })
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
         })
 
         for (const name of ["api", "web"]) {
@@ -214,7 +214,7 @@ describe("close command", () => {
         await writeScope("alpha", ["api"])
 
         const { logs, warnings } = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: false })
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
         })
 
         // api (in scope) closed: worktree + branch gone.
@@ -240,7 +240,7 @@ describe("close command", () => {
         await fsp.writeFile(path.join(wt, "README.md"), "uncommitted\n")
 
         const { logs } = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: false })
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
         })
 
         // Skipped: worktree and branch both remain.
@@ -253,7 +253,7 @@ describe("close command", () => {
 
         // --force closes the dirty repo regardless.
         const forced = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: true })
+            await close.run({ task: "alpha", force: true, "no-hooks": false })
         })
         expect(fs.existsSync(taskDir("alpha", "api"))).toBe(false)
         expect(await branchExists("api", "alpha")).toBe(false)
@@ -271,7 +271,7 @@ describe("close command", () => {
         await sh(wt, "commit", "-m", "feature work")
 
         const { logs } = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: false })
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
         })
 
         expect(fs.existsSync(taskDir("alpha", "api"))).toBe(true)
@@ -283,7 +283,7 @@ describe("close command", () => {
 
         // --force closes the unmerged repo regardless.
         const forced = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: true })
+            await close.run({ task: "alpha", force: true, "no-hooks": false })
         })
         expect(fs.existsSync(taskDir("alpha", "api"))).toBe(false)
         expect(await branchExists("api", "alpha")).toBe(false)
@@ -300,7 +300,7 @@ describe("close command", () => {
         await fsp.writeFile(path.join(webWt, "README.md"), "uncommitted\n")
 
         const { logs } = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: false })
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
         })
 
         // api closed...
@@ -322,7 +322,7 @@ describe("close command", () => {
         await openWorktree("api", "alpha")
 
         const { logs, warnings } = await captureOutput(async () => {
-            await close.run({ task: "ghost", force: false })
+            await close.run({ task: "ghost", force: false, "no-hooks": false })
         })
 
         // The real task is untouched.
@@ -346,7 +346,7 @@ describe("close command", () => {
         await sh(webWt, "commit", "-m", "feature work")
 
         const { logs } = await captureOutput(async () => {
-            await close.run({ task: "alpha", force: true })
+            await close.run({ task: "alpha", force: true, "no-hooks": false })
         })
 
         for (const name of ["api", "web"]) {
@@ -366,7 +366,11 @@ describe("close command", () => {
         try {
             let error: unknown
             try {
-                await close.run({ task: "alpha", force: false })
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
             } catch (e) {
                 error = e
             }
@@ -381,6 +385,7 @@ describe("close command", () => {
     type CloseJson = {
         task: string
         forced: boolean
+        hooks: { event: string; repo: string; exit: number }[]
         repos: { name: string; status: string; reason?: string }[]
     }
 
@@ -393,11 +398,16 @@ describe("close command", () => {
             await openWorktree("web", "alpha")
 
             const json = await captureJson<CloseJson>(async () => {
-                await close.run({ task: "alpha", force: false })
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
             })
             expect(json).toEqual({
                 task: "alpha",
                 forced: false,
+                hooks: [],
                 repos: [
                     { name: "api", status: "closed" },
                     { name: "web", status: "closed" }
@@ -418,11 +428,16 @@ describe("close command", () => {
             await sh(webWt, "commit", "-m", "feature work")
 
             const json = await captureJson<CloseJson>(async () => {
-                await close.run({ task: "alpha", force: false })
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
             })
             expect(json).toEqual({
                 task: "alpha",
                 forced: false,
+                hooks: [],
                 repos: [
                     {
                         name: "api",
@@ -445,11 +460,16 @@ describe("close command", () => {
             await fsp.writeFile(path.join(wt, "README.md"), "uncommitted\n")
 
             const json = await captureJson<CloseJson>(async () => {
-                await close.run({ task: "alpha", force: true })
+                await close.run({
+                    task: "alpha",
+                    force: true,
+                    "no-hooks": false
+                })
             })
             expect(json).toEqual({
                 task: "alpha",
                 forced: true,
+                hooks: [],
                 repos: [{ name: "api", status: "closed" }]
             })
         })
@@ -459,13 +479,137 @@ describe("close command", () => {
             await register(["api"])
 
             const json = await captureJson<CloseJson>(async () => {
-                await close.run({ task: "ghost", force: false })
+                await close.run({
+                    task: "ghost",
+                    force: false,
+                    "no-hooks": false
+                })
             })
             expect(json).toEqual({
                 task: "ghost",
                 forced: false,
+                hooks: [],
                 repos: []
             })
+        })
+    })
+
+    describe("hooks", () => {
+        type CloseHooksJson = {
+            task: string
+            forced: boolean
+            repos: { name: string; status: string; reason?: string }[]
+            hooks: { event: string; repo: string; exit: number }[]
+        }
+
+        // Register flat names AND a hooks map, so the hook wiring can be
+        // exercised (mirrors the helper in the other command specs).
+        const registerWithHooks = async (
+            names: string[],
+            hooks: Record<string, string>
+        ): Promise<void> => {
+            await fsp.writeFile(
+                configPath,
+                `${JSON.stringify(
+                    {
+                        repositories: names.map(
+                            (n) => `https://github.com/acme/${n}.git`
+                        ),
+                        hooks
+                    },
+                    null,
+                    4
+                )}\n`
+            )
+        }
+
+        it("pre-close failure leaves the worktree and branch standing and exits non-zero", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], { "pre-close": "exit 1" })
+            await openWorktree("api", "alpha")
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: CloseHooksJson
+            try {
+                json = await captureJson<CloseHooksJson>(async () => {
+                    await close.run({
+                        task: "alpha",
+                        force: false,
+                        "no-hooks": false
+                    })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // The gate held: nothing was torn down.
+            expect(json.repos).toEqual([
+                {
+                    name: "api",
+                    status: "skipped",
+                    reason: "pre-close hook failed"
+                }
+            ])
+            expect(json.hooks).toEqual([
+                { event: "pre-close", repo: "api", exit: 1 }
+            ])
+            expect(fs.existsSync(taskDir("alpha", "api"))).toBe(true)
+            expect(await branchExists("api", "alpha")).toBe(true)
+        })
+
+        it("post-close runs in the source clone after the worktree is gone, with UBEREPO_REPO_PATH naming it", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], {
+                // Prove the worktree is already gone at fire time, then record
+                // where the hook ran and which path the event was about.
+                "post-close":
+                    'test ! -d "$UBEREPO_REPO_PATH" && echo "$PWD|$UBEREPO_REPO_PATH|$UBEREPO_EVENT" > "$UBEREPO_WORKSPACE/post.txt"'
+            })
+            await openWorktree("api", "alpha")
+
+            const json = await captureJson<CloseHooksJson>(async () => {
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
+            })
+            expect(json.repos).toEqual([{ name: "api", status: "closed" }])
+            expect(json.hooks).toEqual([
+                { event: "post-close", repo: "api", exit: 0 }
+            ])
+            const line = (
+                await fsp.readFile(path.join(root, "post.txt"), "utf8")
+            ).trim()
+            expect(line).toBe(
+                `${path.join(root, "source", "api")}|${path.join(
+                    root,
+                    "tasks",
+                    "alpha",
+                    "api"
+                )}|post-close`
+            )
+        })
+
+        it("does not run close hooks under --no-hooks", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], {
+                "pre-close": "exit 1",
+                "post-close": "exit 1"
+            })
+            await openWorktree("api", "alpha")
+
+            const json = await captureJson<CloseHooksJson>(async () => {
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": true
+                })
+            })
+            expect(json.repos).toEqual([{ name: "api", status: "closed" }])
+            expect(json.hooks).toEqual([])
+            expect(fs.existsSync(taskDir("alpha", "api"))).toBe(false)
         })
     })
 })

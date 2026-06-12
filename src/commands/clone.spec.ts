@@ -460,5 +460,88 @@ describe("clone command", () => {
             const stat = await fsp.stat(path.join(root, "source", "web", "ok"))
             expect(stat.isFile()).toBe(true)
         })
+
+        it("pre-clone failure skips the clone, exits non-zero, and a re-run picks it up", async () => {
+            await writeConfigWithHooks(
+                configPath,
+                ["https://github.com/acme/api.git"],
+                // The gate holds while the block file exists.
+                { "pre-clone": 'test ! -f "$UBEREPO_WORKSPACE/block"' }
+            )
+            await fsp.writeFile(path.join(root, "block"), "")
+            const { calls } = mockClone()
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: CloneJson
+            try {
+                json = await captureJson<CloneJson>(async () => {
+                    await clone.run({ "no-hooks": false })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // The gate held: git.clone never ran, the repo is skipped.
+            expect(calls).toEqual([])
+            expect(json.repos).toEqual([
+                {
+                    name: "api",
+                    status: "skipped",
+                    reason: "pre-clone hook failed"
+                }
+            ])
+            expect(json.hooks).toEqual([
+                { event: "pre-clone", repo: "api", exit: 1 }
+            ])
+
+            // Fix the cause and re-run: the skipped repo is picked up.
+            await fsp.rm(path.join(root, "block"))
+            const rerun = await captureJson<CloneJson>(async () => {
+                await clone.run({ "no-hooks": false })
+            })
+            expect(rerun.repos).toEqual([{ name: "api", status: "cloned" }])
+            expect(calls).toEqual([
+                {
+                    url: "https://github.com/acme/api.git",
+                    dest: path.join(root, "source", "api")
+                }
+            ])
+        })
+
+        it("runs pre-clone at the workspace root with UBEREPO_REPO_PATH naming the would-be clone", async () => {
+            await writeConfigWithHooks(
+                configPath,
+                ["https://github.com/acme/api.git"],
+                {
+                    "pre-clone":
+                        'echo "$PWD|$UBEREPO_REPO_PATH|$UBEREPO_EVENT" > "$UBEREPO_WORKSPACE/pre.txt"'
+                }
+            )
+            mockClone()
+            await captureJson<CloneJson>(async () => {
+                await clone.run({ "no-hooks": false })
+            })
+            const line = (
+                await fsp.readFile(path.join(root, "pre.txt"), "utf8")
+            ).trim()
+            expect(line).toBe(
+                `${root}|${path.join(root, "source", "api")}|pre-clone`
+            )
+        })
+
+        it("does not run pre-clone under --no-hooks", async () => {
+            await writeConfigWithHooks(
+                configPath,
+                ["https://github.com/acme/api.git"],
+                { "pre-clone": "exit 1" }
+            )
+            mockClone()
+            const json = await captureJson<CloneJson>(async () => {
+                await clone.run({ "no-hooks": true })
+            })
+            expect(json.repos).toEqual([{ name: "api", status: "cloned" }])
+            expect(json.hooks).toEqual([])
+        })
     })
 })

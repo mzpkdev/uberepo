@@ -45,11 +45,14 @@ my-workspace/
 Sometimes you can't merge the repos — separate owners, separate CI, separate deploy cadences — so überepo works with the ones you're stuck with, each keeping its own conventions and PR flow.
 
 **If you *can* merge everything into a monorepo, do that. überepo is for when you can't.**
-## Why not just tell your agent to "use worktrees"?
+## Why not just "use worktrees"?
 
-For one repo, one session — sure, do that. Across five repos your agent *improvises*: some branch name, some layout, different every session, different per agent. The convention lives in a prompt, and prompts evaporate.
+If it's one repo and one session, do exactly that.  
+Across five repos it falls apart: every session invents its own branch names and layout, and none of it survives to the next session or the next agent.
 
-**überepo is "use worktrees", written down once** — same branch, same layout, same recovery, for every repo, every session, every agent.
+überepo is "use worktrees" written down once. A task is one folder with a worktree per repo inside, the handoff note and `status --json` tell a fresh session where things stand, and the chores are commands: `sync` rebases everything, `ship` pushes and opens the PRs, `close` tears it down.
+
+**A `CLAUDE.md` can hold a convention. It can't hold machinery.**
 ## Quickstart
 
 ```bash
@@ -57,22 +60,22 @@ npm install -g uberepo
 ```
 ```bash
 # ── once ──────────────────────────────────────────
-# 1. carve out a workspace
+# 1. new workspace
 uberepo init my-workspace && cd my-workspace
-# 2. tell it which repos play (the GitHub org is still acme — nobody ever renames the org)
+# 2. register repos (yes, the org is still acme)
 uberepo add https://github.com/acme/api.git https://github.com/acme/web.git
-# 3. clone them all into source/
+# 3. clone into source/
 uberepo clone
 
 # ── every task ────────────────────────────────────
-# 4. open a task — branch + worktree in every repo, in one shot
+# 4. branch + worktree in every repo
 uberepo open big-rename --goal "Acme → Akko. Every string, every logo, every invoice."
-# 5. do the work — commit inside each worktree; überepo never commits for you
-# 6. rebase the whole task onto fresh upstreams
+# 5. do the work; commits are yours, in each worktree
+# 6. rebase onto fresh upstreams
 uberepo sync big-rename
-# 7. push every branch + open a draft PR per repo (needs the gh CLI)
+# 7. push + draft PR per repo (needs gh)
 uberepo ship big-rename --title "Acme → Akko"
-# 8. once the PRs merge, tear it all down
+# 8. PRs merged? tear it down
 uberepo close big-rename
 ```
 **The loop, end to end:**
@@ -136,12 +139,12 @@ decisions:
 | `uberepo close <task>` | Remove the worktrees and delete the task branch. |
 | `uberepo prune` | Remove merged-and-clean tasks. Previews by default; `--force` to commit. |
 
-Every command accepts `--json`. Commands that run hooks (`clone`, `open`, `sync`) accept `--no-hooks`.
+Every command accepts `--json`. The lifecycle commands (`clone`, `open`, `sync`, `ship`, `close`) accept `--no-hooks`.
 ## How it works
 
 No daemon. No database. No lock file. State lives in git (branches + worktrees), in `uberepo.json` (the manifest), and in `ubertask.yml` (the task note). überepo itself is a thin, opinionated layer over `git worktree`:
 - **Worktrees do the heavy lifting.** Every task branch is a real `git worktree` checkout — überepo reads git's own registry, so there's nothing to desync.
-- **Hooks handle the setup grind.** Wire `post-clone` / `post-open` / `post-sync` into `uberepo.json`; überepo fires them per repo with `UBEREPO_TASK` and `UBEREPO_REPO_*` in the environment — `npm install`, a `.env`, whatever a repo needs to come alive.
+- **Hooks handle the setup grind.** Wire pre-/post- hooks around every lifecycle command (`clone`, `open`, `sync`, `ship`, `close`) into `uberepo.json`; überepo fires them per repo with `UBEREPO_TASK` and `UBEREPO_REPO_*` in the environment — `npm install`, a `.env`, a test gate before `ship` ([full reference](docs/hooks.md)).
 - **It never commits for you.** Branches and worktrees are überepo's job; the commits and pushes stay yours (or your agent's). A coordinator, not a backseat driver.
 
 ---

@@ -3,10 +3,10 @@ import { terminal } from "cmdore"
 import type { HookEvent, UberepoConfig } from "@/config"
 
 // The context a single hook fires in: the workspace root, the repo whose git op
-// just succeeded (its flat source/<name> name, absolute path, clone URL, and —
-// for a worktree-bound event — the task branch), and the task name. `task` and
-// `branch` are absent for post-clone (a clone has no task); the runner maps both
-// to empty UBEREPO_* values so a hook can read the var unconditionally.
+// is running (its flat source/<name> name, absolute path, clone URL, and — for
+// a worktree-bound event — the task branch), and the task name. `task` and
+// `branch` are absent for the clone events (a clone has no task); the runner
+// maps both to empty UBEREPO_* values so a hook can read the var unconditionally.
 export type HookContext = {
     config: UberepoConfig
     workspace: string
@@ -17,6 +17,13 @@ export type HookContext = {
         url: string
         branch?: string
     }
+    // Where the hook runs. Defaults to repo.path; the events whose repo dir
+    // does not exist at fire time (pre-clone, post-close) pass an existing dir
+    // here while repo.path keeps naming the directory the event is about.
+    cwd?: string
+    // The shipped PR's URL (post-ship, when a PR is in hand). Surfaces as
+    // UBEREPO_PR_URL; every other event gets an empty string, never unset.
+    pr?: string
     // Honour --no-hooks (arity-0 boolean from cmdore) without threading argv in.
     noHooks?: boolean
 }
@@ -42,8 +49,9 @@ const disabled = (noHooks?: boolean): boolean => {
 
 // The UBEREPO_* environment a hook receives, layered ON TOP of process.env so a
 // hook still sees PATH and the rest of the ambient environment. These names are
-// the public hook API; post-clone has no task, so UBEREPO_TASK / UBEREPO_BRANCH
-// are empty strings there (never unset) for a stable contract.
+// the public hook API; the clone events have no task, so UBEREPO_TASK /
+// UBEREPO_BRANCH are empty strings there (never unset) for a stable contract,
+// and UBEREPO_PR_URL is non-empty only for a post-ship that has a PR in hand.
 const hookEnv = (event: HookEvent, ctx: HookContext): NodeJS.ProcessEnv => ({
     ...process.env,
     UBEREPO_EVENT: event,
@@ -52,7 +60,8 @@ const hookEnv = (event: HookEvent, ctx: HookContext): NodeJS.ProcessEnv => ({
     UBEREPO_REPO_PATH: ctx.repo.path,
     UBEREPO_REPO_URL: ctx.repo.url,
     UBEREPO_BRANCH: ctx.repo.branch ?? "",
-    UBEREPO_WORKSPACE: ctx.workspace
+    UBEREPO_WORKSPACE: ctx.workspace,
+    UBEREPO_PR_URL: ctx.pr ?? ""
 })
 
 // Run a shell command to completion in `cwd`, resolving with its exit code. The
@@ -79,14 +88,15 @@ const runShell = (
         child.on("close", (code) => resolve(code ?? 1))
     })
 
-// Fire the hook bound to `event` for one repo, after that repo's git op has
-// already succeeded. Returns null when there is nothing to run — no `hooks`
-// entry for the event, or hooks are disabled — so callers can simply skip a
-// null. Otherwise runs the command and returns its { event, repo, exit }. A
-// non-zero exit is NEVER thrown here: the git op is already valid, so the caller
-// logs the failure, keeps going, and exits non-zero at the end (uberepo's
-// partial-state, re-run model). The success/failure line is logged here (human
-// mode only) so every call site reports hooks identically.
+// Fire the hook bound to `event` for one repo, around that repo's git op.
+// Returns null when there is nothing to run — no `hooks` entry for the event,
+// or hooks are disabled — so callers can simply skip a null. Otherwise runs the
+// command and returns its { event, repo, exit }. A non-zero exit is NEVER
+// thrown here: the CALLER decides what it means — a post-* caller logs it,
+// keeps going, and exits non-zero at the end (uberepo's partial-state, re-run
+// model); a pre-* caller additionally skips that repo's op. The
+// success/failure line is logged here (human mode only) so every call site
+// reports hooks identically.
 export const runHook = async (
     event: HookEvent,
     ctx: HookContext
@@ -99,7 +109,11 @@ export const runHook = async (
         return null
     }
     terminal.log(`${ctx.repo.name}: running ${event} hook (${command})`)
-    const exit = await runShell(command, ctx.repo.path, hookEnv(event, ctx))
+    const exit = await runShell(
+        command,
+        ctx.cwd ?? ctx.repo.path,
+        hookEnv(event, ctx)
+    )
     if (exit === 0) {
         terminal.log(`${ctx.repo.name}: ${event} hook ok`)
     } else {

@@ -14,10 +14,12 @@ import {
     readPrTemplate
 } from "@/forge"
 import git, { GitError } from "@/git"
+import { type HookResult, runHook } from "@/hooks"
 import { base } from "@/options/base"
 import { body } from "@/options/body"
 import { bodyFile } from "@/options/body-file"
 import { force } from "@/options/force"
+import { noHooks } from "@/options/no-hooks"
 import { noPr } from "@/options/no-pr"
 import { repos } from "@/options/repos"
 import { title } from "@/options/title"
@@ -84,12 +86,25 @@ export default defineCommand({
     description:
         "Push a task's branches and open a draft pull request per repo",
     arguments: [task],
-    options: [repos, title, body, bodyFile, base, noPr, force],
+    options: [repos, title, body, bodyFile, base, noPr, force, noHooks],
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
         const branch = taskBranch(argv.task)
         const run: Gh = currentGh()
+
+        // Registered URL per flat name, so a fired hook can surface it as
+        // UBEREPO_REPO_URL (mirrors open's map).
+        const urlByName = new Map<string, string>()
+        for (const url of config.repositories) {
+            urlByName.set(normalizeRepository(url).name, url)
+        }
+        // One entry per hook that actually ran (pre-ship and post-ship, for
+        // repos that passed pre-flight — never a skipped one). A non-zero exit
+        // is collected and flips the command's exit code at the end without
+        // aborting the remaining repos.
+        const hooks: HookResult[] = []
+        const failedHooks: HookResult[] = []
 
         // --body and --body-file both override the body; allowing both would be
         // ambiguous. Reject up front (mirrors the design's mutual exclusion).
@@ -169,7 +184,12 @@ export default defineCommand({
         let baseLabel = argv.base ? ghBaseName(argv.base) : ""
 
         if (targets.length === 0) {
-            terminal.json({ task: argv.task, base: baseLabel, repos: [] })
+            terminal.json({
+                task: argv.task,
+                base: baseLabel,
+                repos: [],
+                hooks: []
+            })
             terminal.warn(`Nothing to ship for task ${argv.task}.`)
             return
         }
@@ -251,6 +271,35 @@ export default defineCommand({
         // existing PR is left untouched (push alone refreshes it), so a re-run
         // never clobbers a human-edited title or body.
         for (const item of pending) {
+            // pre-ship GATES the ship: a non-zero exit skips this repo
+            // (nothing is pushed, no PR is touched), the run continues, and
+            // the command exits non-zero at the end. Runs in the worktree
+            // about to be shipped.
+            const pre = await runHook("pre-ship", {
+                config,
+                workspace: root,
+                task: argv.task,
+                repo: {
+                    name: item.name,
+                    path: item.dest,
+                    url: urlByName.get(item.name) ?? "",
+                    branch
+                },
+                noHooks: argv["no-hooks"]
+            })
+            if (pre) {
+                hooks.push(pre)
+                if (pre.exit !== 0) {
+                    failedHooks.push(pre)
+                    item.out.status = "skipped"
+                    item.out.reason = "pre-ship hook failed"
+                    terminal.log(
+                        `${item.name}: pre-ship hook failed — skipping`
+                    )
+                    continue
+                }
+            }
+
             const repo = git(item.source)
             const wt = repo.worktree(item.dest)
             try {
@@ -262,52 +311,82 @@ export default defineCommand({
                 continue
             }
 
-            if (argv["no-pr"]) {
-                // Push-only mode: never invoke gh. The repo is shipped (pushed).
-                continue
+            // Push-only mode (--no-pr) never invokes gh — the repo is shipped
+            // once pushed, and post-ship below fires with no PR URL.
+            if (!argv["no-pr"]) {
+                try {
+                    const existing = await findOpenPr(run, item.dest, branch)
+                    if (existing) {
+                        // PR already open: push already refreshed it — do NOT
+                        // edit its title or body (never clobber human edits).
+                        item.out.pr = {
+                            number: existing.number,
+                            url: existing.url,
+                            action: "updated"
+                        }
+                        terminal.log(
+                            `${item.name}: PR #${existing.number} already open — pushed`
+                        )
+                    } else {
+                        const tmp = await writeTemp(
+                            bodyFor(item.dest, overrideBody)
+                        )
+                        let url: string
+                        try {
+                            url = await prCreate(run, item.dest, {
+                                base: item.ghBase,
+                                head: branch,
+                                title: resolvedTitle,
+                                bodyFile: tmp
+                            })
+                        } finally {
+                            await removeTemp(tmp)
+                        }
+                        item.out.pr = {
+                            number: pullRequestNumber(url) ?? 0,
+                            url,
+                            action: "created"
+                        }
+                        terminal.log(`${item.name}: created draft PR ${url}`)
+                    }
+                } catch (error) {
+                    fail(item.out, ghError(error))
+                }
             }
 
-            try {
-                const existing = await findOpenPr(run, item.dest, branch)
-                if (existing) {
-                    // PR already open: push already refreshed it — do NOT edit
-                    // its title or body (never clobber human edits).
-                    item.out.pr = {
-                        number: existing.number,
-                        url: existing.url,
-                        action: "updated"
+            // post-ship fires once this repo fully shipped: pushed, and its PR
+            // created or found (unless --no-pr). A push/gh failure means no
+            // post-ship. UBEREPO_PR_URL carries the PR's URL when one is in
+            // hand, and is empty under --no-pr.
+            if (item.out.status === "shipped") {
+                const result = await runHook("post-ship", {
+                    config,
+                    workspace: root,
+                    task: argv.task,
+                    pr: item.out.pr?.url,
+                    repo: {
+                        name: item.name,
+                        path: item.dest,
+                        url: urlByName.get(item.name) ?? "",
+                        branch
+                    },
+                    noHooks: argv["no-hooks"]
+                })
+                if (result) {
+                    hooks.push(result)
+                    if (result.exit !== 0) {
+                        failedHooks.push(result)
                     }
-                    terminal.log(
-                        `${item.name}: PR #${existing.number} already open — pushed`
-                    )
-                } else {
-                    const tmp = await writeTemp(
-                        bodyFor(item.dest, overrideBody)
-                    )
-                    let url: string
-                    try {
-                        url = await prCreate(run, item.dest, {
-                            base: item.ghBase,
-                            head: branch,
-                            title: resolvedTitle,
-                            bodyFile: tmp
-                        })
-                    } finally {
-                        await removeTemp(tmp)
-                    }
-                    item.out.pr = {
-                        number: pullRequestNumber(url) ?? 0,
-                        url,
-                        action: "created"
-                    }
-                    terminal.log(`${item.name}: created draft PR ${url}`)
                 }
-            } catch (error) {
-                fail(item.out, ghError(error))
             }
         }
 
-        terminal.json({ task: argv.task, base: baseLabel, repos: results })
+        terminal.json({
+            task: argv.task,
+            base: baseLabel,
+            repos: results,
+            hooks
+        })
 
         const shipped = results.filter((r) => r.status === "shipped").length
         const failed = results.filter((r) => r.status === "failed")
@@ -321,6 +400,20 @@ export default defineCommand({
             terminal.error(
                 `ship failed in ${failed.length} ${
                     failed.length === 1 ? "repository" : "repositories"
+                }: ${which}`
+            )
+            process.exitCode = 1
+        }
+        // A failing post-ship never un-ships its repo (and a failing pre-ship
+        // just left its repo unshipped), but the run is not clean: summarise
+        // and exit non-zero so a wrapper/CI sees the failure.
+        if (failedHooks.length > 0) {
+            const which = failedHooks
+                .map((h) => `${h.repo} (${h.event})`)
+                .join(", ")
+            terminal.error(
+                `hooks failed in ${failedHooks.length} ${
+                    failedHooks.length === 1 ? "repository" : "repositories"
                 }: ${which}`
             )
             process.exitCode = 1

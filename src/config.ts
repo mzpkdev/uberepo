@@ -13,12 +13,26 @@ export const CONFIG_FILENAME = "uberepo.json"
 
 export const TASKS_DIR = "tasks"
 
-// The lifecycle events a hook command can bind to (v1, exactly these three —
-// kebab-case to match git's own hook naming). Each fires per repo right after
-// that repo's git op succeeds: post-clone after a fresh clone, post-open after a
-// new worktree, post-sync after a clean rebase. The list is the source of truth
+// The lifecycle events a hook command can bind to: a pre and a post for each of
+// the five lifecycle commands (kebab-case to match git's own hook naming). Each
+// fires per repo and only when that repo's op actually runs — never on a skip.
+// pre-<op> fires right before the op and GATES it: a non-zero exit skips that
+// repo (the op never runs), the run continues, and the command exits non-zero.
+// post-<op> fires right after the op succeeds; a non-zero exit is logged and
+// flips the exit code without undoing anything. The list is the source of truth
 // for both the config validator's typo guard and the runner's lookups.
-export const HOOK_EVENTS = ["post-clone", "post-open", "post-sync"] as const
+export const HOOK_EVENTS = [
+    "pre-clone",
+    "post-clone",
+    "pre-open",
+    "post-open",
+    "pre-sync",
+    "post-sync",
+    "pre-ship",
+    "post-ship",
+    "pre-close",
+    "post-close"
+] as const
 
 export type HookEvent = (typeof HOOK_EVENTS)[number]
 

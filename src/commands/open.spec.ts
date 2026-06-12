@@ -1001,5 +1001,88 @@ describe("open command", () => {
                 fs.existsSync(path.join(root, "tasks", "alpha", "web", "ok"))
             ).toBe(true)
         })
+
+        it("pre-open failure skips the repo, exits non-zero, and a re-run picks it up", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], {
+                // The gate holds while the block file exists.
+                "pre-open": 'test ! -f "$UBEREPO_WORKSPACE/block"'
+            })
+            await fsp.writeFile(path.join(root, "block"), "")
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: OpenJson
+            try {
+                json = await captureJson<OpenJson>(async () => {
+                    await open.run({
+                        "no-hooks": false,
+                        task: "alpha",
+                        from: undefined,
+                        goal: undefined,
+                        repos: undefined
+                    })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // The gate held: no worktree was created.
+            expect(json.repos).toEqual([
+                {
+                    name: "api",
+                    status: "skipped",
+                    reason: "pre-open hook failed"
+                }
+            ])
+            expect(json.hooks).toEqual([
+                { event: "pre-open", repo: "api", exit: 1 }
+            ])
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(false)
+
+            // Fix the cause and re-run: the skipped repo is picked up.
+            await fsp.rm(path.join(root, "block"))
+            const rerun = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            expect(rerun.repos).toEqual([{ name: "api", status: "created" }])
+            expect(await branchAt("api", "alpha")).toBe("task/alpha")
+        })
+
+        it("runs pre-open in the source clone with UBEREPO_REPO_PATH naming the would-be worktree", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], {
+                "pre-open":
+                    'echo "$PWD|$UBEREPO_REPO_PATH|$UBEREPO_EVENT" > "$UBEREPO_WORKSPACE/pre.txt"'
+            })
+            await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            const line = (
+                await fsp.readFile(path.join(root, "pre.txt"), "utf8")
+            ).trim()
+            expect(line).toBe(
+                `${path.join(root, "source", "api")}|${path.join(
+                    root,
+                    "tasks",
+                    "alpha",
+                    "api"
+                )}|pre-open`
+            )
+        })
     })
 })

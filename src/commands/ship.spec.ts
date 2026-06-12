@@ -158,6 +158,7 @@ const argv = (over: Partial<Parameters<typeof ship.run>[0]> = {}) => ({
     base: undefined,
     "no-pr": false,
     force: false,
+    "no-hooks": false,
     ...over
 })
 
@@ -281,6 +282,7 @@ describe("ship command", () => {
             reason?: string
             error?: string
         }[]
+        hooks: { event: string; repo: string; exit: number }[]
     }
 
     // ── State matrix ──
@@ -750,7 +752,7 @@ describe("ship command", () => {
         const json = await captureJson<ShipJson>(async () => {
             await ship.run(argv({ task: "ghost" }))
         })
-        expect(json).toEqual({ task: "ghost", base: "", repos: [] })
+        expect(json).toEqual({ task: "ghost", base: "", repos: [], hooks: [] })
     })
 
     // ── config guard ──
@@ -794,5 +796,119 @@ describe("ship command", () => {
                 status: "shipped"
             }
         ])
+    })
+
+    describe("hooks", () => {
+        // Register flat names AND a hooks map, so the hook wiring can be
+        // exercised (mirrors the helper in the other command specs).
+        const registerWithHooks = async (
+            names: string[],
+            hooks: Record<string, string>
+        ): Promise<void> => {
+            await fsp.writeFile(
+                configPath,
+                `${JSON.stringify(
+                    {
+                        repositories: names.map(
+                            (n) => `https://github.com/acme/${n}.git`
+                        ),
+                        hooks
+                    },
+                    null,
+                    4
+                )}\n`
+            )
+        }
+
+        it("pre-ship failure skips the repo: nothing pushed, no gh calls, exit non-zero", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], { "pre-ship": "exit 1" })
+            const wt = await openWorktree("api", "alpha")
+            await commitWork(wt)
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: ShipJson
+            try {
+                json = await captureJson<ShipJson>(async () => {
+                    await ship.run(argv())
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // The gate held: skipped with the reason, nothing pushed...
+            expect(json.repos).toEqual([
+                {
+                    name: "api",
+                    branch: "task/alpha",
+                    pushed: false,
+                    status: "skipped",
+                    reason: "pre-ship hook failed"
+                }
+            ])
+            expect(json.hooks).toEqual([
+                { event: "pre-ship", repo: "api", exit: 1 }
+            ])
+            // ...the branch never reached the bare remote, and gh saw no PR
+            // call (only the up-front --version availability probe).
+            await expect(remoteBranchSha("api", "alpha")).rejects.toThrow()
+            expect(gh.calls.filter((c) => c.args[0] === "pr")).toEqual([])
+        })
+
+        it("post-ship fires after a created PR with UBEREPO_PR_URL set to it", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], {
+                "post-ship":
+                    'echo "$UBEREPO_PR_URL|$UBEREPO_EVENT" > "$UBEREPO_WORKSPACE/post.txt"'
+            })
+            const wt = await openWorktree("api", "alpha")
+            await commitWork(wt)
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const json = await captureJson<ShipJson>(async () => {
+                await ship.run(argv())
+            })
+            expect(json.repos[0].status).toBe("shipped")
+            const url = json.repos[0].pr?.url
+            expect(url).toContain("/pull/")
+            expect(json.hooks).toEqual([
+                { event: "post-ship", repo: "api", exit: 0 }
+            ])
+            const line = (
+                await fsp.readFile(path.join(root, "post.txt"), "utf8")
+            ).trim()
+            expect(line).toBe(`${url}|post-ship`)
+        })
+
+        it("post-ship fires under --no-pr with an empty UBEREPO_PR_URL", async () => {
+            await makeSource("api")
+            await registerWithHooks(["api"], {
+                "post-ship":
+                    'echo "[$UBEREPO_PR_URL]" > "$UBEREPO_WORKSPACE/post.txt"'
+            })
+            const wt = await openWorktree("api", "alpha")
+            await commitWork(wt)
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const json = await captureJson<ShipJson>(async () => {
+                await ship.run(argv({ "no-pr": true }))
+            })
+            // Pushed for real, no gh call, and post-ship still fired.
+            expect(json.repos[0].status).toBe("shipped")
+            expect(json.repos[0].pushed).toBe(true)
+            expect(gh.calls).toEqual([])
+            expect(json.hooks).toEqual([
+                { event: "post-ship", repo: "api", exit: 0 }
+            ])
+            const line = (
+                await fsp.readFile(path.join(root, "post.txt"), "utf8")
+            ).trim()
+            expect(line).toBe("[]")
+        })
     })
 })

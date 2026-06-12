@@ -121,10 +121,11 @@ export default defineCommand({
         // or abort), deliberately not touching the repos that follow.
         let synced = 0
         const repos: SyncRepo[] = []
-        // One entry per repo whose post-sync hook actually ran (cleanly rebased
-        // repos only — never dirty-skipped, conflicted, or not-reached). A
-        // non-zero exit is collected and flips the command's exit code at the
-        // end without aborting the remaining repos.
+        // One entry per hook that actually ran: pre-sync for every repo whose
+        // rebase was attempted, post-sync for cleanly rebased repos only —
+        // never dirty-skipped, conflicted, or not-reached ones. A non-zero
+        // exit is collected and flips the command's exit code at the end
+        // without aborting the remaining repos.
         const hooks: HookResult[] = []
         const failedHooks: HookResult[] = []
         // Mark every target the sequential run never reached as skipped, append
@@ -174,6 +175,31 @@ export default defineCommand({
                 onto = resolved
             }
 
+            // pre-sync GATES the rebase: a non-zero exit skips this repo (its
+            // worktree is left untouched), the run CONTINUES to the next repo
+            // (unlike a conflict, nothing is half-done here), and the command
+            // exits non-zero at the end.
+            const pre = await runHook("pre-sync", {
+                config,
+                workspace: root,
+                task: argv.task,
+                repo: { name, path: dest, url, branch },
+                noHooks: argv["no-hooks"]
+            })
+            if (pre) {
+                hooks.push(pre)
+                if (pre.exit !== 0) {
+                    failedHooks.push(pre)
+                    repos.push({
+                        name,
+                        status: "skipped",
+                        reason: "pre-sync hook failed"
+                    })
+                    terminal.log(`${name}: pre-sync hook failed — skipping`)
+                    continue
+                }
+            }
+
             await repo.fetch()
             terminal.log(
                 `Syncing ${name} → rebasing ${branch} onto ${resolved}`
@@ -215,12 +241,15 @@ export default defineCommand({
                 synced === 1 ? "repository" : "repositories"
             }`
         )
-        // A failing hook never undoes its rebase, but the run is not clean:
-        // summarise and exit non-zero so a wrapper/CI sees the failure.
+        // A failing post-sync never undoes its rebase (and a failing pre-sync
+        // just left its repo unrebased), but the run is not clean: summarise
+        // and exit non-zero so a wrapper/CI sees the failure.
         if (failedHooks.length > 0) {
-            const which = failedHooks.map((h) => h.repo).join(", ")
+            const which = failedHooks
+                .map((h) => `${h.repo} (${h.event})`)
+                .join(", ")
             terminal.error(
-                `post-sync hook failed in ${failedHooks.length} ${
+                `hooks failed in ${failedHooks.length} ${
                     failedHooks.length === 1 ? "repository" : "repositories"
                 }: ${which}`
             )
