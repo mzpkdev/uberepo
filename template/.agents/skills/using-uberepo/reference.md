@@ -162,52 +162,68 @@ task on `close`.
 
 ## Lifecycle hooks
 
-Run a shell command in each repo right after a uberepo git op lands — e.g. install
-deps after a clone, relink after a sync. Declared in `uberepo.json` as a `hooks` map
-of event → command **string** (a command line run through the shell, so any
-interpreter works: `npm ci`, `bash x.sh`, `python3 y.py`, an inline one-liner).
+Run a shell command in each repo around every uberepo git op — install deps
+after a clone, gate a push on the tests, clean up after a close. Declared in
+`uberepo.json` as a `hooks` map of event → command **string** (a command line
+run through the shell, so any interpreter works: `npm ci`, `bash x.sh`,
+`python3 y.py`, an inline one-liner).
 
     {
       "repositories": ["git@github.com:acme/api.git"],
       "hooks": {
-        "post-clone": "npm ci",
-        "post-open":  "bash $UBEREPO_WORKSPACE/.uberepo/setup.sh",
-        "post-sync":  "python3 $UBEREPO_WORKSPACE/.uberepo/relink.py"
+        "post-open": "npm install",
+        "pre-ship":  "npm test"
       }
     }
 
-The three valid events (each fires **per repo**, right after that repo's git op
-*succeeds*, and **only for repos that did the work** — never a skipped one):
+Every lifecycle command has a **pre** and a **post** event (ten total). Each
+fires **per repo**, and **only for repos that did the work** — never a skipped
+one (already cloned, already open, dirty, nothing to ship).
 
-| Event | Fires after | cwd |
+- **pre-\* GATES the op:** a non-zero exit skips that repo (the op never runs),
+  the run continues with the other repos, and the command exits non-zero. Fix
+  the cause and re-run — the skipped repos are picked up. A failed `pre-close`
+  leaves the worktree and branch standing.
+- **post-\* reports:** fires right after the op succeeds; a non-zero exit is
+  logged and flips the exit code, but nothing is rolled back.
+
+| Event | Around | cwd |
 | --- | --- | --- |
-| `post-clone` | a repo is freshly cloned | `source/<name>/` |
-| `post-open` | a task worktree is newly created | `tasks/<task>/<name>/` |
-| `post-sync` | a task worktree is cleanly rebased | `tasks/<task>/<name>/` |
+| `pre-clone` | a repo's fresh clone | workspace root (`UBEREPO_REPO_PATH` = the would-be `source/<name>`) |
+| `post-clone` | after the clone lands | `source/<name>/` |
+| `pre-open` | a new task worktree | `source/<name>/` (`UBEREPO_REPO_PATH` = the would-be worktree) |
+| `post-open` | after the worktree lands | `tasks/<task>/<name>/` |
+| `pre-sync` | a worktree's rebase | `tasks/<task>/<name>/` |
+| `post-sync` | after a clean rebase | `tasks/<task>/<name>/` |
+| `pre-ship` | a repo's push + PR | `tasks/<task>/<name>/` |
+| `post-ship` | after push (and PR unless `--no-pr`) | `tasks/<task>/<name>/` |
+| `pre-close` | a worktree's teardown | `tasks/<task>/<name>/` |
+| `post-close` | after worktree + branch are gone | `source/<name>/` (`UBEREPO_REPO_PATH` = the removed worktree) |
 
-An unknown event key is a config error (listing the valid events). A manifest with
-no `hooks` key behaves exactly as before — hooks are entirely opt-in.
+An unknown event key is a config error (listing the valid events). A manifest
+with no `hooks` key behaves exactly as before — hooks are entirely opt-in.
 
 **Environment** — every hook inherits the parent environment plus:
 
 | Var | Value |
 | --- | --- |
-| `UBEREPO_EVENT` | the event name (`post-clone` / `post-open` / `post-sync`) |
+| `UBEREPO_EVENT` | the event name (one of the ten above) |
 | `UBEREPO_WORKSPACE` | absolute workspace root |
 | `UBEREPO_REPO` | the repo's flat `source/<name>` name |
-| `UBEREPO_REPO_PATH` | absolute path of the repo/worktree (also the cwd) |
+| `UBEREPO_REPO_PATH` | absolute path of the dir the event is about (usually the cwd; see table) |
 | `UBEREPO_REPO_URL` | the repo's registered clone URL |
-| `UBEREPO_TASK` | the task name (empty for `post-clone`) |
-| `UBEREPO_BRANCH` | `task/<task>` (empty for `post-clone`) |
+| `UBEREPO_TASK` | the task name (empty for the clone events) |
+| `UBEREPO_BRANCH` | `task/<task>` (empty for the clone events) |
+| `UBEREPO_PR_URL` | the PR's URL in `post-ship` once created/found; empty otherwise (incl. `--no-pr`) |
 
-- **cwd gotcha:** a hook runs with its cwd set to the **repo/worktree**, not the
-  workspace root. Anchor any script path with `$UBEREPO_WORKSPACE` (as above), not a
-  bare relative path.
-- **Failure:** a non-zero hook exit is logged and the run **continues** to the next
-  repo; the command then exits non-zero with a summary. The git op is never rolled
-  back — the clone/worktree is already valid, so just fix the cause and re-run.
-- **Kill switch:** pass `--no-hooks` (on `clone`/`open`/`sync`), or set the
-  `UBEREPO_NO_HOOKS` env var, to skip every hook for that run.
+- **cwd gotcha:** a hook runs with its cwd set to the dir in the table, not the
+  workspace root. Anchor any script path with `$UBEREPO_WORKSPACE`, not a bare
+  relative path.
+- **Failure:** a non-zero exit is logged, the run **continues** to the next
+  repo, and the command exits non-zero with a summary. pre-* failure = that
+  repo's op never ran (re-run picks it up); post-* failure = the op stands.
+- **Kill switch:** pass `--no-hooks` (on `clone`/`open`/`sync`/`ship`/`close`),
+  or set the `UBEREPO_NO_HOOKS` env var, to skip every hook for that run.
 
 ## Set up / share a workspace
 
@@ -251,13 +267,13 @@ Optional keys (`reason`, `error`, `note`) are omitted when they don't apply.
 | `add` | `{ added: string[], skipped: string[] }` — `added` = flat names added; `skipped` = URLs already registered |
 | `remove` | `{ removed: string[], notFound: string[] }` — each the normalized host/owner/repo key |
 | `sources` | `[{ name, url, cloned }]` |
-| `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `hooks` has one entry per freshly-cloned repo whose `post-clone` ran |
+| `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `reason` (skip): `"pre-clone hook failed"`; `hooks` lists every hook that ran (pre and post) |
 | `pull` | `{ repos: [{ name, status: "updated" \| "current" \| "skipped", reason? }] }` — `reason`: `"not cloned"`, `"uncommitted changes"`, `"can't fast-forward"` |
 | `status` | `[{ name, repos: [{ name, branch?, dirty }], note? }]` |
-| `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped" }], hooks: [{ event, repo, exit }], note? }` — `hooks` has one entry per newly-created worktree whose `post-open` ran; `note` is the full task note (see below); absent only when nothing is cloned |
-| `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`; `onto` is `""` if it bailed before resolving; `hooks` has one entry per cleanly-rebased repo whose `post-sync` ran |
-| `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |
-| `close` | `{ task, forced: bool, repos: [{ name, status: "closed" \| "skipped", reason? }] }` — `reason`: `"uncommitted changes"`, `"unmerged commits"` |
+| `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], hooks: [{ event, repo, exit }], note? }` — `reason` (skip): `"pre-open hook failed"`; `hooks` lists every hook that ran (pre and post); `note` is the full task note (see below); absent only when nothing is cloned |
+| `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post) |
+| `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |
+| `close` | `{ task, forced: bool, repos: [{ name, status: "closed" \| "skipped", reason? }], hooks: [{ event, repo, exit }] }` — `reason`: `"uncommitted changes"`, `"unmerged commits"`, `"pre-close hook failed"` |
 | `prune` | `{ forced: bool, tasks: [{ task, status: "pruned" \| "kept", reason? }] }` — `reason`: `"dirty"`, `"unmerged"`, or the failure message; when `forced` is false a `"pruned"` status means a preview candidate (nothing removed yet) |
 
 The `note` object (in `status` and `open`) is the parsed `ubertask.yml` plus its

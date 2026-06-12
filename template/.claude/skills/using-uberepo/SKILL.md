@@ -52,12 +52,14 @@ across them at once and switch tasks by switching directories — not `git check
      an existing PR untouched (push refreshes it).
    - `uberepo close <task>` — remove worktrees + delete the branch. Refuses
      uncommitted/unmerged work; `--force` only when the work is saved.
-   - **Hooks (optional):** if `uberepo.json` has a `hooks` map, `post-clone` /
-     `post-open` / `post-sync` shell commands run per repo after that git op lands
-     (cwd = the repo/worktree; env + full tables in reference.md). A hook may
-     already have installed deps or copied configs — check before redoing that
-     work. `--no-hooks` skips them for a run; use it when the human asks, not by
-     default.
+   - **Hooks (optional):** if `uberepo.json` has a `hooks` map, pre-/post- shell
+     commands run per repo around every lifecycle op (`clone`/`open`/`sync`/
+     `ship`/`close`). A failing pre-* hook skips that repo's op — a failed
+     `pre-ship` blocks the push, a failed `pre-close` keeps the worktree; cwd =
+     the repo/worktree, `UBEREPO_*` vars in the env (full tables in
+     reference.md). A hook may already have installed deps or copied configs —
+     check before redoing that work. `--no-hooks` skips them for a run; use it
+     when the human asks, not by default.
 3. **For flags, sharing, and refusal-recovery**, read [reference.md](reference.md).
    `uberepo --help` lists every command and flag.
 
