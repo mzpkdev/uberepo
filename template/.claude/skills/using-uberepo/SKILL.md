@@ -35,7 +35,10 @@ across them at once and switch tasks by switching directories — not `git check
    branch/clean-dirty) and `uberepo sources --json` (registered repos +
    cloned-or-not); when clean/dirty isn't enough, `uberepo diff <task> --json`
    reports the task's footprint — commits ahead + diffstat per repo (read-only;
-   uncommitted changes aren't counted). Parse the JSON; don't scrape human text.
+   uncommitted changes aren't counted). Resuming or handing off a task,
+   `uberepo context <task> --json` is the one-shot read: the note + diff's
+   footprint + PR state per repo (no `gh` → PR state silently omitted).
+   Parse the JSON; don't scrape human text.
    Re-read before reporting state. `--json` is a global flag on **every**
    command — pass it to any command for a single stable JSON object describing
    its outcome.
@@ -43,11 +46,14 @@ across them at once and switch tasks by switching directories — not `git check
    - `uberepo open <task>` — worktree + `task/<task>` branch in every cloned repo.
      `--from <ref>` chooses a base; `--goal "<text>"` sets the task note's goal;
      `--repos <name>...` scopes the task to those repos (and is unioned in on
-     re-open). Idempotent.
+     re-open) — a scoped repo not yet cloned is cloned on demand first; unscoped
+     opens never clone. Idempotent.
    - Edit in `tasks/<task>/<name>/`. **Commit and push per repo yourself** —
      uberepo does NOT commit or push. Follow each repo's own AGENTS.md/README.
    - `uberepo sync <task>` — rebase each worktree onto its fresh default branch.
      Refuses a dirty worktree; stops on conflict and leaves that repo mid-rebase.
+     `--check` forecasts all that first, per repo (fetch only — no rebase, no
+     hooks), so run it when you want to see the conflicts before hitting them.
    - `uberepo ship <task>` — push each repo's branch and open a **draft** PR per
      repo. Needs the GitHub CLI (`gh`) unless `--no-pr`. `--title`/`--body`
      override; otherwise title = goal's first line, body = the repo's `.github` PR
@@ -80,9 +86,10 @@ A per-task handoff note carrying the durable context git can't: the `goal`,
 with the task on `close`. It holds the *why*, not the *what* — git already shows
 what changed, what's done, what's left.
 
-- **Resuming a task:** read it first for the standing context, then reconcile
-  against `git status`/`git diff`. It's a hint, not truth — if they disagree,
-  reality wins, so fix the note.
+- **Resuming a task:** `uberepo context <task> --json` is the one read — the
+  note plus per-repo state and PR state together — then reconcile the note
+  against git's reality. It's a hint, not truth — if they disagree, reality
+  wins, so fix the note.
 - **While you work:** set `goal` when you open the task; append a `decision` or
   `blocker` the moment one lands, tagging `repo:` when it's about a single repo.
   Don't record progress, next-steps, or dates — git and the file's mtime cover those.
