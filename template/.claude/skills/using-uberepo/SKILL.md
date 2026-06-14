@@ -45,9 +45,12 @@ across them at once and switch tasks by switching directories — not `git check
 2. **Work the lifecycle** (one task = one `task/<task>` branch across every repo):
    - `uberepo open <task>` — worktree + `task/<task>` branch in every cloned repo.
      `--from <ref>` chooses a base; `--goal "<text>"` sets the task note's goal;
-     `--repos <name>...` scopes the task to those repos (and is unioned in on
-     re-open) — a scoped repo not yet cloned is cloned on demand first; unscoped
-     opens never clone. Idempotent.
+     `--repos <name>...` is ADDITIVE — it scopes a brand-new task to those repos
+     and only ever GROWS scope on re-open, never narrows it (an unscoped "all
+     repos" task can't be narrowed — it stays unscoped, and naming `--repos` just
+     clones+opens any named repo not already present). A named repo not yet cloned
+     is cloned on demand first; an unscoped open never clones on its own.
+     Idempotent.
    - Edit in `tasks/<task>/<name>/`. **Commit and push per repo yourself** —
      uberepo does NOT commit or push. Follow each repo's own AGENTS.md/README.
    - `uberepo sync <task>` — rebase each worktree onto its fresh default branch.

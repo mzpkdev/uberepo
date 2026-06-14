@@ -79,6 +79,19 @@ export default defineCommand({
         const existing = await ubertask.read(note)
         const storedScope = existing?.repos ?? []
 
+        // Whether this task ALREADY EXISTS — needed because both a brand-new
+        // task and an existing UNSCOPED one have an empty stored scope, yet
+        // --repos must treat them differently: it SEEDS the initial scope of a
+        // brand-new task but must only ADD to (never narrow) an existing
+        // unscoped task, which stays unscoped (= all cloned repos). A bare
+        // unscoped open seeds a note, but the nothing-to-open path below does
+        // not, so the open worktree dirs are consulted too: a re-open must
+        // never strand a worktree the task already owns, note present or not.
+        const present = registered.filter((name) =>
+            fs.existsSync(worktreePath(root, argv.task, name))
+        )
+        const taskExists = existing !== undefined || present.length > 0
+
         // Validate --repos BEFORE creating anything: every supplied name must
         // be a registered repo. It need NOT be cloned — a registered-but-
         // uncloned name is the on-demand clone path below. Mirror clone's
@@ -99,26 +112,41 @@ export default defineCommand({
             }
         }
 
-        // The effective scope is the UNION of any stored scope and the supplied
-        // one (replacing would strand worktrees the task already owns). An empty
-        // result means an unscoped task — fan out to every cloned repo, today's
-        // behaviour. Order: stored first, then newly-supplied, for stable notes.
+        // The effective scope: --repos only ever GROWS a task's scope, never
+        // narrows it. Three cases, keyed off the stored scope and whether the
+        // task already exists:
+        //   - Already scoped (stored scope non-empty): UNION the supplied names
+        //     in — replacing would strand worktrees the task already owns.
+        //   - Existing UNSCOPED task (stored scope empty, task exists): STAYS
+        //     unscoped — an unscoped task is "all cloned repos", the maximal
+        //     set, so --repos can't shrink it. The named repos still get
+        //     cloned-on-demand + opened (added to `targets` below), but the
+        //     recorded scope remains [] so no already-open worktree is stranded.
+        //   - Brand-new task (stored scope empty, task doesn't exist yet):
+        //     --repos SEEDS the initial scope; no --repos leaves it unscoped.
+        // Order: stored first, then newly-supplied, for stable notes.
         const scope: string[] = [...storedScope]
-        for (const name of suppliedScope) {
-            if (!scope.includes(name)) {
-                scope.push(name)
+        if (storedScope.length > 0 || !taskExists) {
+            for (const name of suppliedScope) {
+                if (!scope.includes(name)) {
+                    scope.push(name)
+                }
             }
         }
         const scoped = scope.length > 0
         // Worktree targets. Scoped: the in-scope REGISTERED repos (scope ∩
         // registered, kept in registration order) — an in-scope repo that
         // isn't cloned yet is cloned on demand in the loop below, because a
-        // scoped name is an explicit ask for exactly that repo. Unscoped:
-        // every cloned repo, exactly today's behaviour — an unscoped open
-        // NEVER clones implicitly.
+        // scoped name is an explicit ask for exactly that repo. Unscoped: every
+        // cloned repo PLUS any supplied --repos names (∩ registered) — naming a
+        // repo is an explicit ask for it, so it is cloned-on-demand + opened
+        // even on an unscoped task; without --repos this is exactly today's
+        // every-cloned-repo behaviour, which still never clones implicitly.
         const targets = scoped
             ? registered.filter((n) => scope.includes(n))
-            : [...cloned]
+            : registered.filter(
+                  (n) => cloned.includes(n) || suppliedScope.includes(n)
+              )
 
         // Warn + skip the uncloned repos this run will NOT touch (registered
         // but outside the targets), the way status does, so a partially-cloned
@@ -129,11 +157,16 @@ export default defineCommand({
             }
         }
 
-        if (cloned.length === 0 && !scoped) {
-            // No worktree is opened and no note is seeded on this path, so the
-            // JSON carries an empty scope/repos, no clone, hooks, or carry,
-            // and no note key. A SCOPED open proceeds instead — its scope
-            // names what to clone on demand.
+        if (
+            targets.length === 0 &&
+            scope.every((n) => registered.includes(n))
+        ) {
+            // Nothing to open: no worktree target survived (no cloned repo and
+            // no --repos name to clone on demand). No worktree is opened and no
+            // note is seeded on this path, so the JSON carries an empty scope/
+            // repos, no clone, hooks, or carry, and no note key. The scope.every
+            // guard keeps an unregistered stored-scope name out of this path so
+            // it is still reported as a per-repo skip in the loop below.
             terminal.json({
                 task: argv.task,
                 scope: [],
@@ -148,9 +181,10 @@ export default defineCommand({
 
         let opened = 0
         const repos: OpenRepo[] = []
-        // One entry per repo this run clone-attempted ON DEMAND (a scoped
-        // target with no source/<name> yet) — the same per-repo shape `clone`
-        // emits. Empty whenever no on-demand clone ran, unscoped runs included.
+        // One entry per repo this run clone-attempted ON DEMAND (an explicitly
+        // asked-for target with no source/<name> yet — a scoped name, or a
+        // --repos name on an unscoped task) — the same per-repo shape `clone`
+        // emits. Empty whenever no on-demand clone ran.
         const clone: CloneRepo[] = []
         // One entry per hook that actually ran (pre-/post-clone for on-demand
         // clones, pre-open and post-open for worktrees this run actually tried
@@ -184,11 +218,13 @@ export default defineCommand({
             const source = path.join(root, "source", name)
             const dest = worktreePath(root, argv.task, name)
             const relative = path.join(TASKS_DIR, argv.task, name)
-            // On-demand clone: a scoped target with no clone yet is cloned
-            // FIRST, as the same per-repo lifecycle op `uberepo clone` runs
-            // (pre-clone gate → git clone → post-clone, identical hook cwd/env
-            // contract), then opened below like any cloned repo. Only a scoped
-            // open can get here — unscoped targets are always already cloned.
+            // On-demand clone: a target with no clone yet is cloned FIRST, as
+            // the same per-repo lifecycle op `uberepo clone` runs (pre-clone
+            // gate → git clone → post-clone, identical hook cwd/env contract),
+            // then opened below like any cloned repo. A target is uncloned only
+            // when it was explicitly asked for — a scoped name, or a --repos
+            // name on an unscoped task; an unscoped open never adds an uncloned
+            // target on its own, so it still never clones implicitly.
             if (!fs.existsSync(source)) {
                 const outcome = await cloneSource({
                     config,

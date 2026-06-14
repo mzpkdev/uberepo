@@ -73,18 +73,21 @@ cloned repo, off each clone's current HEAD.
 
 - `--from <ref>` — base the branches off `<ref>` instead of current HEAD.
 - `--goal "<text>"` — set the task note's `goal` (creates/updates `ubertask.yml`).
-- `--repos <name>...` — scope the task to these repos (their `source/<name>`):
-  only they get worktrees, and the set is recorded as the note's `repos:`. On
-  re-open, supplied names are unioned into the stored scope, never replacing it;
-  omit `--repos` to leave the scope unchanged. No `--repos` ever = unscoped (every
-  cloned repo).
-- **Scoped repos clone on demand.** A repo in the task's scope (named by
+- `--repos <name>...` — **ADDITIVE scope; it only ever grows, never narrows.**
+  On a brand-new task it sets the initial scope (only the named repos get
+  worktrees) and records it as the note's `repos:`. On a re-open the supplied
+  names are unioned into the stored scope, never replacing it. An unscoped task
+  (`repos: []` = every cloned repo, the maximal set) CANNOT be narrowed: naming
+  `--repos` on it leaves it unscoped and simply clones+opens any named repo not
+  already present, never stranding the worktrees it already owns. Omit `--repos`
+  to leave the scope unchanged. No `--repos` ever = unscoped.
+- **Named repos clone on demand.** A repo explicitly asked for (named by
   `--repos` now, or stored in the note's `repos:` on a re-open) that is
   registered but not yet cloned is cloned into `source/<name>` first — its
   `pre-clone`/`post-clone` hooks fire exactly as under `uberepo clone` — then
-  opened like any other repo. ONLY explicitly scoped repos do this; an
-  unscoped open never clones anything. A failed on-demand clone is reported
-  for that repo, the run continues with the rest, and the command exits
+  opened like any other repo. ONLY explicitly named repos do this; an unscoped
+  open with no `--repos` never clones anything. A failed on-demand clone is
+  reported for that repo, the run continues with the rest, and the command exits
   non-zero at the end (re-running retries it). A `--repos` name that isn't
   registered at all is an error.
 - Idempotent: re-running skips repos already opened and picks up repos cloned
@@ -193,9 +196,11 @@ task on `close`.
 
 - `goal` — one-line `|` block: what done looks like and why. Always set it.
 - `repos` — the task's declared **scope**: the `source/<name>` repos it owns.
-  `open --repos` writes it; `sync`/`close`/`prune` act only on these repos and warn
-  about a worktree outside the scope. Empty (`repos: []`) = unscoped (every cloned
-  repo). This is the task's scope — distinct from a decision/blocker item's `repo:`.
+  `open --repos` writes it and only ever GROWS it (additive — it never narrows an
+  existing scope); `sync`/`close`/`prune` act only on these repos and warn about a
+  worktree outside the scope. Empty (`repos: []`) = unscoped (every cloned repo)
+  and stays empty — an unscoped task can't be narrowed by `--repos`. This is the
+  task's scope — distinct from a decision/blocker item's `repo:`.
 - `tickets` — list of URLs (issue, PR, doc, thread).
 - `decisions` / `blockers` — lists of `{ note: |, repo? }`. `note` is a `|` literal
   block (free text — colons, `#`, slashes need no quoting). `repo:` is optional —

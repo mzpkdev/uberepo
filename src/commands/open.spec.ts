@@ -815,6 +815,169 @@ describe("open command", () => {
             ).toBe(true)
             expect(await scopeOf("alpha")).toEqual([])
         })
+
+        it("is ADDITIVE: --repos on an existing UNSCOPED task never narrows it", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await makeSource("docs")
+            await register(["api", "web", "docs"])
+
+            // First open is unscoped: every cloned repo gets a worktree, scope
+            // recorded as [] (the maximal "all repos" set).
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            expect(await scopeOf("alpha")).toEqual([])
+
+            // Re-open with --repos docs: the task must STAY unscoped (not
+            // collapse to [docs]) — every original worktree survives, and docs
+            // (already cloned + opened) is unaffected.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["docs"]
+                })
+            })
+
+            // All three worktrees still present — api/web were NOT stranded.
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(true)
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "docs"))
+            ).toBe(true)
+            // Scope stays unscoped — never narrowed to just the named repo.
+            expect(await scopeOf("alpha")).toEqual([])
+        })
+
+        it("clones a --repos name on demand for an existing unscoped task, staying unscoped", async () => {
+            await makeSource("api")
+            await makeUpstream("web") // registered, never cloned
+            await register(["api", "web"])
+
+            // Unscoped first open: only api is cloned, so only api opens.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(false)
+            expect(await scopeOf("alpha")).toEqual([])
+            const { calls } = mockClone()
+
+            // Re-open with --repos web: web is an explicit ask, so it's cloned
+            // on demand and opened — but the task STAYS unscoped (scope []).
+            const json = await captureJson<OpenJson>(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["web"]
+                })
+            })
+
+            // web was cloned on demand and its worktree opened; api survives.
+            expect(calls.map((c) => c.url)).toEqual([
+                "https://github.com/acme/web.git"
+            ])
+            expect(
+                fs.existsSync(path.join(root, "source", "web", ".git"))
+            ).toBe(true)
+            expect(await branchAt("web", "alpha")).toBe("task/alpha")
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            expect(json.clone).toEqual([{ name: "web", status: "cloned" }])
+            expect(json.repos).toEqual([
+                { name: "api", status: "skipped" },
+                { name: "web", status: "created" }
+            ])
+            // Stays unscoped in both the live JSON and the persisted note.
+            expect(json.scope).toEqual([])
+            expect(await scopeOf("alpha")).toEqual([])
+        })
+
+        it("GROWS a scoped task: --repos adds to the stored scope (regression guard)", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await makeSource("db")
+            await register(["api", "web", "db"])
+
+            // Scope to [api, web] up front.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api", "web"]
+                })
+            })
+            expect(await scopeOf("alpha")).toEqual(["api", "web"])
+
+            // Re-open with --repos db: the scope GROWS to [api, web, db].
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["db"]
+                })
+            })
+
+            expect(await scopeOf("alpha")).toEqual(["api", "web", "db"])
+            for (const name of ["api", "web", "db"]) {
+                expect(
+                    fs.existsSync(path.join(root, "tasks", "alpha", name))
+                ).toBe(true)
+            }
+        })
+
+        it("a brand-new task with --repos seeds the named scope", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            // No prior note, no prior worktree: --repos sets the INITIAL scope.
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api"]
+                })
+            })
+
+            expect(await scopeOf("alpha")).toEqual(["api"])
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "api"))
+            ).toBe(true)
+            // web is out of the seeded scope, so it gets no worktree.
+            expect(
+                fs.existsSync(path.join(root, "tasks", "alpha", "web"))
+            ).toBe(false)
+        })
     })
 
     type OpenJson = {
