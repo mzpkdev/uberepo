@@ -2,9 +2,8 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { terminal } from "cmdore"
 import { minimatch } from "minimatch"
-import { repositoryUrl, type UberepoConfig } from "@/config"
+import type { UberepoConfig } from "@/config"
 import git from "@/git"
-import { normalizeRepository } from "@/url"
 
 // A fresh worktree holds only tracked files, so the untracked local config a
 // repo needs to boot (.env, docker-compose.override.yml, local certs) stays
@@ -40,31 +39,22 @@ export type CarryContext = {
     worktree: string
 }
 
-// The effective pattern set for a repo: the workspace-level `carry` UNIONED
-// with the repo entry's own `carry`, in that order, de-duplicated. Empty means
-// carry is a no-op for the repo.
+// The effective pattern set for a repo, resolved from the single top-level
+// `carry` field: absent ⇒ none; an ARRAY ⇒ that same global list for every
+// repo; an OBJECT ⇒ the list keyed by this repo's `name` (absent key ⇒ none).
+// Empty means carry is a no-op for the repo.
 export const carryPatterns = (
     config: UberepoConfig,
     name: string
 ): string[] => {
-    const patterns: string[] = []
-    const add = (list: string[] | undefined): void => {
-        for (const pattern of list ?? []) {
-            if (!patterns.includes(pattern)) {
-                patterns.push(pattern)
-            }
-        }
+    const carry = config.carry
+    if (carry === undefined) {
+        return []
     }
-    add(config.carry)
-    for (const entry of config.repositories) {
-        if (typeof entry === "string") {
-            continue
-        }
-        if (normalizeRepository(repositoryUrl(entry)).name === name) {
-            add(entry.carry)
-        }
+    if (Array.isArray(carry)) {
+        return carry
     }
-    return patterns
+    return carry[name] ?? []
 }
 
 // gitignore-flavoured matching against a repo-root-relative path: patterns are

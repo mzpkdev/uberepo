@@ -70,7 +70,7 @@ across them at once and switch tasks by switching directories — not `git check
      check before redoing that work. `--no-hooks` skips them for a run; use it
      when the human asks, not by default.
    - **Carry (optional):** if `uberepo.json` has `carry` glob patterns
-     (workspace-level and/or per repo), `open` copies the matching untracked
+     (one array for every repo, or an object keyed by repo name), `open` copies the matching untracked
      local files (`.env`, certs) from `source/<name>` into each fresh worktree
      before its post-open hook, and `sync` re-copies missing ones. Existing
      worktree files are never overwritten. `close` warns when a carried file

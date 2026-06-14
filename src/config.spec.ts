@@ -1,12 +1,31 @@
 import * as fsp from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
+import { terminal } from "cmdore"
 import { CONFIG_FILENAME, Config } from "@/config"
 
 const configPath = (dir: string): string => path.join(dir, CONFIG_FILENAME)
 
 const writeConfig = async (dir: string, raw: string): Promise<void> => {
     await fsp.writeFile(configPath(dir), raw)
+}
+
+// Capture terminal.warn for the duration of `fn` (parse emits a warning, never
+// a throw, for a per-repo carry key that matches no registered repository),
+// then restore it, handing back `fn`'s value alongside the collected lines.
+const captureWarnings = async <T>(
+    fn: () => Promise<T>
+): Promise<{ value: T; warnings: string[] }> => {
+    const originalWarn = terminal.warn
+    const warnings: string[] = []
+    terminal.warn = (message?: string) => {
+        warnings.push(message ?? "")
+    }
+    try {
+        return { value: await fn(), warnings }
+    } finally {
+        terminal.warn = originalWarn
+    }
 }
 
 describe("Config", () => {
@@ -65,7 +84,7 @@ describe("Config", () => {
             const error = await Config.read({ cwd: tmp }).catch((e) => e)
             expect(error).toBeInstanceOf(Error)
             expect((error as Error).message).toBe(
-                `${configPath(tmp)}: "repositories" must be an array of URL strings or { url, carry } objects`
+                `${configPath(tmp)}: "repositories" must be an array of URL strings`
             )
         })
 
@@ -187,33 +206,57 @@ describe("Config", () => {
             expect("carry" in config).toBe(false)
         })
 
-        it("reads a { url, carry } repository entry alongside plain strings", async () => {
+        it("reads a per-repo carry map keyed by repo name", async () => {
             await writeConfig(
                 tmp,
                 JSON.stringify({
                     repositories: [
                         "https://github.com/acme/api.git",
-                        {
-                            url: "https://github.com/acme/web.git",
-                            carry: ["certs/*.pem"]
-                        }
-                    ]
+                        "https://github.com/acme/web.git"
+                    ],
+                    carry: {
+                        api: [".env*"],
+                        web: ["certs/*.pem"]
+                    }
                 })
             )
-            const config = await Config.read({ cwd: tmp })
+            const { value: config, warnings } = await captureWarnings(() =>
+                Config.read({ cwd: tmp })
+            )
             expect(config).toEqual({
                 repositories: [
                     "https://github.com/acme/api.git",
-                    {
-                        url: "https://github.com/acme/web.git",
-                        carry: ["certs/*.pem"]
-                    }
-                ]
+                    "https://github.com/acme/web.git"
+                ],
+                carry: {
+                    api: [".env*"],
+                    web: ["certs/*.pem"]
+                }
             })
+            // Every key matches a repo, so nothing is warned about.
+            expect(warnings).toEqual([])
         })
 
-        it("rejects a workspace carry that is not an array of non-empty strings", async () => {
-            for (const carry of [".env*", [".env*", 7], [""], ["  "]]) {
+        it("warns (does not throw) on a carry map key matching no repo", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({
+                    repositories: ["https://github.com/acme/api.git"],
+                    carry: { api: [".env"], ghost: [".env"] }
+                })
+            )
+            const { value: config, warnings } = await captureWarnings(() =>
+                Config.read({ cwd: tmp })
+            )
+            // The config still loads — the warning is advisory only.
+            expect(config.carry).toEqual({ api: [".env"], ghost: [".env"] })
+            expect(warnings.join("\n")).toContain(`"carry" key "ghost"`)
+            // The matching key is not warned about.
+            expect(warnings.join("\n")).not.toContain(`"carry" key "api"`)
+        })
+
+        it("rejects a workspace carry array of non-empty strings", async () => {
+            for (const carry of [[".env*", 7], [""], ["  "]]) {
                 await writeConfig(
                     tmp,
                     JSON.stringify({ repositories: [], carry })
@@ -226,56 +269,58 @@ describe("Config", () => {
             }
         })
 
-        it("rejects a repository entry carry that is malformed, naming the repo", async () => {
+        it("rejects a carry that is neither an array nor an object", async () => {
+            await writeConfig(
+                tmp,
+                JSON.stringify({ repositories: [], carry: ".env*" })
+            )
+            const error = await Config.read({ cwd: tmp }).catch((e) => e)
+            expect(error).toBeInstanceOf(Error)
+            expect((error as Error).message).toBe(
+                `${configPath(tmp)}: "carry" must be an array of glob patterns (applied to every repo) or an object mapping a repo name to its patterns`
+            )
+        })
+
+        it("rejects a carry map value that is not a string array, naming the key", async () => {
             await writeConfig(
                 tmp,
                 JSON.stringify({
-                    repositories: [
-                        { url: "https://github.com/acme/api.git", carry: "no" }
-                    ]
+                    repositories: ["https://github.com/acme/api.git"],
+                    carry: { api: "no" }
                 })
             )
             const error = await Config.read({ cwd: tmp }).catch((e) => e)
             expect(error).toBeInstanceOf(Error)
             expect((error as Error).message).toBe(
-                `${configPath(tmp)}: "carry" for https://github.com/acme/api.git must be an array of non-empty glob pattern strings`
+                `${configPath(tmp)}: "carry" for api must be an array of non-empty glob pattern strings`
             )
         })
 
-        it("rejects a repository entry that is neither a string nor an object", async () => {
+        it("rejects a repository entry that is not a string", async () => {
             await writeConfig(tmp, JSON.stringify({ repositories: [42] }))
             const error = await Config.read({ cwd: tmp }).catch((e) => e)
             expect(error).toBeInstanceOf(Error)
             expect((error as Error).message).toBe(
-                `${configPath(tmp)}: each "repositories" entry must be a URL string or a { url, carry } object`
+                `${configPath(tmp)}: each "repositories" entry must be a URL string`
             )
         })
 
-        it("rejects a repository entry object without a url", async () => {
-            await writeConfig(
-                tmp,
-                JSON.stringify({ repositories: [{ carry: [".env"] }] })
-            )
-            const error = await Config.read({ cwd: tmp }).catch((e) => e)
-            expect(error).toBeInstanceOf(Error)
-            expect((error as Error).message).toBe(
-                `${configPath(tmp)}: a "repositories" entry object must have a non-empty "url" string`
-            )
-        })
-
-        it("rejects a repository entry object with an unknown key", async () => {
+        it("rejects a repository entry carrying a carry key, pointing to top-level carry", async () => {
             await writeConfig(
                 tmp,
                 JSON.stringify({
                     repositories: [
-                        { url: "https://x.com/a/b.git", cary: [".env"] }
+                        {
+                            url: "https://github.com/acme/api.git",
+                            carry: [".env"]
+                        }
                     ]
                 })
             )
             const error = await Config.read({ cwd: tmp }).catch((e) => e)
             expect(error).toBeInstanceOf(Error)
             expect((error as Error).message).toBe(
-                `${configPath(tmp)}: a "repositories" entry has an unknown key "cary" — valid keys are url, carry`
+                `${configPath(tmp)}: a "repositories" entry has a "carry" key — carry is now a top-level field (an array applied to every repo, or an object mapping a repo name to its patterns), not a per-entry one. Replace the object entry with its bare URL string and move "carry" to the top level.`
             )
         })
     })

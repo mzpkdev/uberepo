@@ -8,24 +8,40 @@ into its task worktrees, automatically, on `open` and `sync`.
 
 ## The `carry` patterns
 
-Declare glob patterns in `uberepo.json`, at the workspace level (applies to
-every repo), per repo (an entry can be a `{ "url", "carry" }` object instead
-of a bare URL string), or both — a repo's effective set is the union of the
-two. Patterns must be non-empty strings; anything else is rejected at config
-read.
+Declare glob patterns in `uberepo.json` under a single top-level `carry`
+field. It's one of two forms — never both. As an **array**, it's global:
+every repo carries the same patterns.
 
 ```json
 {
     "repositories": [
         "https://github.com/acme/api.git",
-        {
-            "url": "https://github.com/acme/web.git",
-            "carry": ["certs/*.pem"]
-        }
+        "https://github.com/acme/web.git"
     ],
     "carry": [".env*", "config/local.json"]
 }
 ```
+
+As an **object**, it's per repo — keyed by repo name (the trailing slug of
+each URL in `repositories`), each value its own pattern list. A repo with no
+key carries nothing; a key matching no registered repo is warned about.
+
+```json
+{
+    "repositories": [
+        "https://github.com/acme/api.git",
+        "https://github.com/acme/web.git"
+    ],
+    "carry": {
+        "api": [".env*"],
+        "web": ["certs/*.pem"]
+    }
+}
+```
+
+`repositories` is a plain list of URL strings. Patterns must be non-empty
+strings; anything else is rejected at config read. Omit `carry` entirely and
+nothing is carried.
 
 Patterns are matched against paths relative to the repo root, anchored there:
 `.env*` matches only root-level `.env` files, `certs/*.pem` only directly

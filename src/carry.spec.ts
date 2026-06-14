@@ -92,39 +92,41 @@ describe("carry", () => {
     const url = (name: string): string => `https://github.com/acme/${name}.git`
 
     describe("carryPatterns", () => {
-        it("unions workspace-level and per-repo patterns, workspace first", () => {
+        it("returns [] when carry is absent", () => {
             const config: UberepoConfig = {
-                repositories: [{ url: url("api"), carry: ["certs/*.pem"] }],
-                carry: [".env*"]
+                repositories: [url("api")]
             }
+            expect(carryPatterns(config, "api")).toEqual([])
+        })
+
+        it("returns the global array for every repo when carry is an array", () => {
+            const config: UberepoConfig = {
+                repositories: [url("api"), url("web")],
+                carry: [".env*", "certs/*.pem"]
+            }
+            // The same list, regardless of the repo name.
             expect(carryPatterns(config, "api")).toEqual([
+                ".env*",
+                "certs/*.pem"
+            ])
+            expect(carryPatterns(config, "web")).toEqual([
                 ".env*",
                 "certs/*.pem"
             ])
         })
 
-        it("de-duplicates a pattern declared at both levels", () => {
+        it("returns each repo's own list in the map form, [] for an absent key", () => {
             const config: UberepoConfig = {
-                repositories: [
-                    { url: url("api"), carry: [".env*", "local.json"] }
-                ],
-                carry: [".env*"]
+                repositories: [url("api"), url("web")],
+                carry: {
+                    api: [".env*"],
+                    web: ["web-only.json"]
+                }
             }
-            expect(carryPatterns(config, "api")).toEqual([
-                ".env*",
-                "local.json"
-            ])
-        })
-
-        it("ignores other repos' entries and plain string entries", () => {
-            const config: UberepoConfig = {
-                repositories: [
-                    url("api"),
-                    { url: url("web"), carry: ["web-only.json"] }
-                ]
-            }
-            expect(carryPatterns(config, "api")).toEqual([])
+            expect(carryPatterns(config, "api")).toEqual([".env*"])
             expect(carryPatterns(config, "web")).toEqual(["web-only.json"])
+            // A repo not named in the map carries nothing.
+            expect(carryPatterns(config, "worker")).toEqual([])
         })
     })
 
@@ -349,7 +351,7 @@ describe("carry", () => {
             expect(deep?.copied).toEqual([".env", "packages/app/.env"])
         })
 
-        it("applies the union of workspace and per-repo patterns", async () => {
+        it("applies a per-repo map entry's patterns", async () => {
             const source = await makeSource("api")
             const worktree = await makeWorktree("api")
             await write(source, ".env", "SECRET=1\n")
@@ -358,10 +360,8 @@ describe("carry", () => {
             const { value: result } = await captureOutput(() =>
                 runCarry({
                     config: {
-                        repositories: [
-                            { url: url("api"), carry: ["certs/*.pem"] }
-                        ],
-                        carry: [".env*"]
+                        repositories: [url("api")],
+                        carry: { api: [".env*", "certs/*.pem"] }
                     },
                     name: "api",
                     source,

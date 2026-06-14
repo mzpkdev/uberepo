@@ -283,17 +283,19 @@ with no `hooks` key behaves exactly as before — hooks are entirely opt-in.
 ## Carry — local files into worktrees
 
 A fresh worktree has only tracked files, so untracked local config (`.env`,
-override files, certs) stays behind in `source/<name>`. `carry` glob patterns
-in `uberepo.json` name the untracked files to copy into task worktrees —
-workspace-level, per repo (a `{ "url", "carry" }` entry instead of a bare URL
-string), or both; a repo's effective set is the union of the two.
+override files, certs) stays behind in `source/<name>`. The top-level `carry`
+field in `uberepo.json` names the untracked files to copy into task worktrees.
+It's an array (global — every repo carries it) **or** an object keyed by repo
+name (per repo), never both; omit it and nothing is carried. A per-repo key
+matching no registered repo is warned about. `repositories` is a plain list of
+URL strings.
 
     {
       "repositories": [
         "git@github.com:acme/api.git",
-        { "url": "git@github.com:acme/web.git", "carry": ["certs/*.pem"] }
+        "git@github.com:acme/web.git"
       ],
-      "carry": [".env*"]
+      "carry": { "api": [".env*"], "web": ["certs/*.pem"] }
     }
 
 - Patterns are relative to the repo root and anchored there; `*`/`?` don't

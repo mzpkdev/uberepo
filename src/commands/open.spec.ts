@@ -182,20 +182,19 @@ describe("open command", () => {
         )
     }
 
-    // Register repositories — a flat name (plain URL string) or a
-    // { name, carry } per-repo entry — plus any top-level carry/hooks, so the
-    // carry wiring can be exercised in every config shape.
+    // Register repositories by flat name (plain URL strings) plus any top-level
+    // carry/hooks. `carry` is a single field: an array (global) or a map of
+    // repo name -> patterns (per-repo), so the carry wiring can be exercised in
+    // both config shapes.
     const registerWith = async (
-        entries: (string | { name: string; carry: string[] })[],
-        extra: { carry?: string[]; hooks?: Record<string, string> } = {}
+        names: string[],
+        extra: {
+            carry?: string[] | Record<string, string[]>
+            hooks?: Record<string, string>
+        } = {}
     ): Promise<void> => {
-        const repositories = entries.map((entry) =>
-            typeof entry === "string"
-                ? `https://github.com/acme/${entry}.git`
-                : {
-                      url: `https://github.com/acme/${entry.name}.git`,
-                      carry: entry.carry
-                  }
+        const repositories = names.map(
+            (name) => `https://github.com/acme/${name}.git`
         )
         await fsp.writeFile(
             configPath,
@@ -1008,7 +1007,8 @@ describe("open command", () => {
             // post-clone lays an untracked .env into the fresh source clone —
             // carry must then pick it up for the worktree, proving the clone →
             // hook → open → carry ordering holds for a lazy clone.
-            await registerWith([{ name: "web", carry: [".env"] }], {
+            await registerWith(["web"], {
+                carry: { web: [".env"] },
                 hooks: { "post-clone": 'echo "SECRET=1" > .env' }
             })
             mockClone()
@@ -1497,16 +1497,15 @@ describe("open command", () => {
             ])
         })
 
-        it("unions workspace-level and per-repo patterns per entry", async () => {
+        it("applies each repo's patterns from the per-repo carry map", async () => {
             await makeSource("api")
             await makeSource("web")
-            await registerWith(
-                [{ name: "api", carry: ["certs/*.pem"] }, "web"],
-                { carry: [".env"] }
-            )
+            await registerWith(["api", "web"], {
+                carry: { api: [".env", "certs/*.pem"] }
+            })
             await localFile("api", ".env", "A\n")
             await localFile("api", "certs/local.pem", "PEM\n")
-            // web's entry has no certs pattern, so its cert stays behind.
+            // web is absent from the map, so its cert stays behind.
             await localFile("web", "certs/local.pem", "PEM\n")
 
             const json = await captureJson<OpenJson>(openAlpha)
@@ -1519,16 +1518,12 @@ describe("open command", () => {
             expect(
                 fs.existsSync(path.join(root, "tasks", "alpha", "web", "certs"))
             ).toBe(false)
+            // web is absent from the map, so it has no patterns and is omitted
+            // from the carry report entirely (runCarry returns null for it).
             expect(json.carry).toEqual([
                 {
                     repo: "api",
                     copied: [".env", "certs/local.pem"],
-                    keptExisting: [],
-                    skippedTracked: []
-                },
-                {
-                    repo: "web",
-                    copied: [],
                     keptExisting: [],
                     skippedTracked: []
                 }
