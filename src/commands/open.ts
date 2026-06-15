@@ -2,16 +2,22 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
-import { type CarryEntry, runCarry } from "@/carry"
-import { Config, repositoryUrl, TASKS_DIR } from "@/config"
-import git from "@/git"
-import { type HookResult, runHook } from "@/hooks"
+import type { CarryEntry } from "@/carry"
+import { Config, TASKS_DIR } from "@/config"
+import type { HookResult } from "@/hooks"
+import {
+    type OpenRepo,
+    planOpen,
+    summarize,
+    validateSuppliedRepos
+} from "@/open-plan"
+import { collectSources, openRepoWorktree } from "@/open-steps"
 import { from } from "@/options/from"
 import { goal } from "@/options/goal"
 import { noHooks } from "@/options/no-hooks"
 import { repos } from "@/options/repos"
 import { TEMPLATE_DIR } from "@/package-root"
-import { type CloneRepo, cloneSource } from "@/sources"
+import type { CloneRepo } from "@/sources"
 import {
     type TaskNote,
     taskBranch,
@@ -19,18 +25,6 @@ import {
     worktreePath
 } from "@/tasks"
 import * as ubertask from "@/ubertask"
-import { normalizeRepository } from "@/url"
-
-// One repo's open outcome: `created` (a fresh worktree landed) or `skipped`
-// (its worktree was already open — the idempotent/recovery path — or no
-// worktree could be attempted, with `reason` set: a failed pre-open or
-// pre-clone hook, a failed on-demand clone, or a scope name that isn't
-// registered at all).
-type OpenRepo = {
-    name: string
-    status: "created" | "skipped"
-    reason?: string
-}
 
 // The seed ubertask.yml lives in the package's real template/ dir and is
 // byte-copied into a task at runtime. TEMPLATE_DIR is anchored to the package
@@ -53,23 +47,12 @@ export default defineCommand({
         const base = argv.from ?? "HEAD"
 
         // The registered flat names (registration order) with their URLs, and
-        // which of them are already cloned. Whether an uncloned repo is merely
-        // skipped or cloned on demand depends on the scope — computed below —
-        // so nothing is logged here yet. The URL map lets a fired hook surface
-        // UBEREPO_REPO_URL and feeds the on-demand clones (the loops below
-        // work in flat names).
-        const registered: string[] = []
-        const cloned: string[] = []
-        const urlByName = new Map<string, string>()
-        for (const entry of config.repositories) {
-            const url = repositoryUrl(entry)
-            const { name } = normalizeRepository(url)
-            registered.push(name)
-            urlByName.set(name, url)
-            if (fs.existsSync(path.join(root, "source", name))) {
-                cloned.push(name)
-            }
-        }
+        // which of them are already cloned, read off disk. Whether an uncloned
+        // repo is merely skipped or cloned on demand depends on the scope —
+        // computed below — so nothing is logged here yet. The URL map lets a
+        // fired hook surface UBEREPO_REPO_URL and feeds the on-demand clones
+        // (the loops below work in flat names).
+        const { registered, cloned, urlByName } = collectSources(config, root)
 
         // The task's durable note carries its declared scope; read it once up
         // front so a re-open without --repos can honour a previously-stored
@@ -92,81 +75,36 @@ export default defineCommand({
         )
         const taskExists = existing !== undefined || present.length > 0
 
-        // Validate --repos BEFORE creating anything: every supplied name must
-        // be a registered repo. It need NOT be cloned — a registered-but-
-        // uncloned name is the on-demand clone path below. Mirror clone's
-        // pre-flight collision guard — fail loud and create nothing on the
-        // first unknown name, so a typo never half-opens a task.
-        const suppliedScope: string[] = []
-        if (argv.repos !== undefined) {
-            for (const name of argv.repos) {
-                if (!registered.includes(name)) {
-                    const known = registered.join(", ") || "(none registered)"
-                    throw new Error(
-                        `${name} is not a registered repository — known: ${known}. Register it (or fix the name) before scoping a task to it.`
-                    )
-                }
-                if (!suppliedScope.includes(name)) {
-                    suppliedScope.push(name)
-                }
-            }
-        }
-
-        // The effective scope: --repos only ever GROWS a task's scope, never
-        // narrows it. Three cases, keyed off the stored scope and whether the
-        // task already exists:
-        //   - Already scoped (stored scope non-empty): UNION the supplied names
-        //     in — replacing would strand worktrees the task already owns.
-        //   - Existing UNSCOPED task (stored scope empty, task exists): STAYS
-        //     unscoped — an unscoped task is "all cloned repos", the maximal
-        //     set, so --repos can't shrink it. The named repos still get
-        //     cloned-on-demand + opened (added to `targets` below), but the
-        //     recorded scope remains [] so no already-open worktree is stranded.
-        //   - Brand-new task (stored scope empty, task doesn't exist yet):
-        //     --repos SEEDS the initial scope; no --repos leaves it unscoped.
-        // Order: stored first, then newly-supplied, for stable notes.
-        const scope: string[] = [...storedScope]
-        if (storedScope.length > 0 || !taskExists) {
-            for (const name of suppliedScope) {
-                if (!scope.includes(name)) {
-                    scope.push(name)
-                }
-            }
-        }
-        const scoped = scope.length > 0
-        // Worktree targets. Scoped: the in-scope REGISTERED repos (scope ∩
-        // registered, kept in registration order) — an in-scope repo that
-        // isn't cloned yet is cloned on demand in the loop below, because a
-        // scoped name is an explicit ask for exactly that repo. Unscoped: every
-        // cloned repo PLUS any supplied --repos names (∩ registered) — naming a
-        // repo is an explicit ask for it, so it is cloned-on-demand + opened
-        // even on an unscoped task; without --repos this is exactly today's
-        // every-cloned-repo behaviour, which still never clones implicitly.
-        const targets = scoped
-            ? registered.filter((n) => scope.includes(n))
-            : registered.filter(
-                  (n) => cloned.includes(n) || suppliedScope.includes(n)
-              )
+        // Validate --repos BEFORE creating anything (deduped, supplied order;
+        // throws on the first unregistered name), then let the pure planner
+        // resolve the scope, the worktree targets, and the skip sets. The shell
+        // below only does the IO the plan calls for.
+        const suppliedScope = validateSuppliedRepos(argv.repos, registered)
+        const plan = planOpen({
+            registered,
+            cloned,
+            storedScope,
+            suppliedScope,
+            taskExists,
+            hasNote: existing !== undefined,
+            goal: argv.goal
+        })
+        const scope = plan.scope
 
         // Warn + skip the uncloned repos this run will NOT touch (registered
         // but outside the targets), the way status does, so a partially-cloned
         // workspace still opens what it can.
-        for (const name of registered) {
-            if (!cloned.includes(name) && !targets.includes(name)) {
-                terminal.log(`Skipping ${name} — not cloned (run clone first)`)
-            }
+        for (const name of plan.notCloned) {
+            terminal.log(`Skipping ${name} — not cloned (run clone first)`)
         }
 
-        if (
-            targets.length === 0 &&
-            scope.every((n) => registered.includes(n))
-        ) {
+        if (plan.empty) {
             // Nothing to open: no worktree target survived (no cloned repo and
             // no --repos name to clone on demand). No worktree is opened and no
             // note is seeded on this path, so the JSON carries an empty scope/
-            // repos, no clone, hooks, or carry, and no note key. The scope.every
-            // guard keeps an unregistered stored-scope name out of this path so
-            // it is still reported as a per-repo skip in the loop below.
+            // repos, no clone, hooks, or carry, and no note key. The empty guard
+            // keeps an unregistered stored-scope name off this path so it is
+            // still reported as a per-repo skip in the loop below.
             terminal.json({
                 task: argv.task,
                 scope: [],
@@ -192,7 +130,6 @@ export default defineCommand({
         // collected and flips the command's exit code at the end without
         // aborting the rest.
         const hooks: HookResult[] = []
-        const failedHooks: HookResult[] = []
         // One entry per repo whose carry actually ran (a NEWLY-created worktree
         // in a repo with carry patterns): the untracked local files copied in,
         // kept, or skipped as tracked. A skipped (already-open) worktree keeps
@@ -202,143 +139,43 @@ export default defineCommand({
         // cloned (there is no URL to clone from). A note may legitimately
         // outlive a repo's registration, so this is a per-repo skip — warned
         // and recorded, never an abort.
-        for (const name of scope) {
-            if (!registered.includes(name)) {
-                repos.push({
-                    name,
-                    status: "skipped",
-                    reason: "not registered"
-                })
-                terminal.warn(
-                    `${name}: in the task scope but not a registered repository — skipping; add it or remove it from the note's repos:`
-                )
-            }
-        }
-        for (const name of targets) {
-            const source = path.join(root, "source", name)
-            const dest = worktreePath(root, argv.task, name)
-            const relative = path.join(TASKS_DIR, argv.task, name)
-            // On-demand clone: a target with no clone yet is cloned FIRST, as
-            // the same per-repo lifecycle op `uberepo clone` runs (pre-clone
-            // gate → git clone → post-clone, identical hook cwd/env contract),
-            // then opened below like any cloned repo. A target is uncloned only
-            // when it was explicitly asked for — a scoped name, or a --repos
-            // name on an unscoped task; an unscoped open never adds an uncloned
-            // target on its own, so it still never clones implicitly.
-            if (!fs.existsSync(source)) {
-                const outcome = await cloneSource({
-                    config,
-                    root,
-                    name,
-                    url: urlByName.get(name) ?? "",
-                    noHooks: argv["no-hooks"]
-                })
-                clone.push(outcome.repo)
-                for (const hook of outcome.hooks) {
-                    hooks.push(hook)
-                    if (hook.exit !== 0) {
-                        failedHooks.push(hook)
-                    }
-                }
-                if (outcome.repo.status !== "cloned") {
-                    // No clone landed (git failed, or the pre-clone gate
-                    // held), so there is no repo to open a worktree in: record
-                    // the skip and continue with the remaining repos — the
-                    // failure flips the exit code at the end, and a re-run
-                    // picks the repo up (per-repo resilience, like ship).
-                    repos.push({
-                        name,
-                        status: "skipped",
-                        reason:
-                            outcome.repo.status === "failed"
-                                ? "clone failed"
-                                : outcome.repo.reason
-                    })
-                    continue
-                }
-            }
-            // Idempotent: an existing worktree dir is left untouched. This is
-            // also the recovery path — re-running open skips the done repos
-            // and resumes after a mid-run failure.
-            if (fs.existsSync(dest)) {
-                repos.push({ name, status: "skipped" })
-                terminal.log(
-                    `Skipping ${name} — worktree already open at ${relative}`
-                )
-                continue
-            }
-            // pre-open GATES the worktree: a non-zero exit skips this repo (no
-            // worktree is created), the run continues, and the command exits
-            // non-zero at the end. The worktree does not exist yet, so the
-            // hook runs in the repo's source clone while UBEREPO_REPO_PATH
-            // names the would-be worktree.
-            const pre = await runHook("pre-open", {
-                config,
-                workspace: root,
-                task: argv.task,
-                cwd: source,
-                repo: {
-                    name,
-                    path: dest,
-                    url: urlByName.get(name) ?? "",
-                    branch
-                },
-                noHooks: argv["no-hooks"]
-            })
-            if (pre) {
-                hooks.push(pre)
-                if (pre.exit !== 0) {
-                    failedHooks.push(pre)
-                    repos.push({
-                        name,
-                        status: "skipped",
-                        reason: "pre-open hook failed"
-                    })
-                    terminal.log(`Skipping ${name} — pre-open hook failed`)
-                    continue
-                }
-            }
-            terminal.log(
-                `Opening ${name} → ${relative} (${branch} from ${base})`
-            )
-            // Fail-fast: a creation error propagates, stopping before any
-            // later repo is touched; already-created worktrees stay put.
-            const repo = git(source)
-            await repo.worktree(dest).create({ branch, from: base })
-            repos.push({ name, status: "created" })
-            opened += 1
-            // Carry the configured untracked local files (.env and friends)
-            // from the source clone into the fresh worktree BEFORE post-open
-            // fires, so a hook like `npm ci && db:migrate` finds them in place.
-            const carried = await runCarry({
-                config,
+        for (const name of plan.unknownScope) {
+            repos.push({
                 name,
-                source,
-                worktree: dest
+                status: "skipped",
+                reason: "not registered"
             })
-            if (carried) {
-                carry.push({ repo: name, ...carried })
+            terminal.warn(
+                `${name}: in the task scope but not a registered repository — skipping; add it or remove it from the note's repos:`
+            )
+        }
+        // Each target's worktree is opened (and, on demand, cloned) by the
+        // effectful step, which RETURNS its outcome as a value — the per-repo
+        // entry, an optional on-demand-clone entry, the hooks that ran, an
+        // optional carry entry, and whether a worktree actually landed. The loop
+        // just aggregates those into the run's arrays; the fail-fast
+        // worktree-create error propagates straight through to abort the run.
+        const ctx = {
+            config,
+            root,
+            task: argv.task,
+            branch,
+            base,
+            urlByName,
+            noHooks: argv["no-hooks"]
+        }
+        for (const name of plan.targets) {
+            const out = await openRepoWorktree(name, ctx)
+            repos.push(out.repo)
+            if (out.clone) {
+                clone.push(out.clone)
             }
-            // post-open fires for the NEWLY-created worktree only, with cwd =
-            // the worktree and branch = task/<task>. A hook failure is recorded
-            // and the loop continues — the worktree already exists.
-            const result = await runHook("post-open", {
-                config,
-                workspace: root,
-                task: argv.task,
-                repo: {
-                    name,
-                    path: dest,
-                    url: urlByName.get(name) ?? "",
-                    branch
-                },
-                noHooks: argv["no-hooks"]
-            })
-            if (result) {
-                hooks.push(result)
-                if (result.exit !== 0) {
-                    failedHooks.push(result)
-                }
+            hooks.push(...out.hooks)
+            if (out.carry) {
+                carry.push(out.carry)
+            }
+            if (out.opened) {
+                opened += 1
             }
         }
 
@@ -347,40 +184,33 @@ export default defineCommand({
         // The task dir already exists (a worktree just landed under it); mkdir -p
         // covers the all-skipped case for safety.
         await fs.promises.mkdir(path.dirname(note), { recursive: true })
-        // The scope only changes the note when --repos actually grew it past
-        // what was already stored; re-running with the same (or no) scope leaves
-        // the note's repos: line untouched, preserving the no-clobber contract.
-        const scopeGrew = scope.length > storedScope.length
-        if (argv.goal === undefined && !scopeGrew) {
-            // Nothing to write into the note: preserve the original idempotent /
-            // recovery contract — byte-copy the template only for a brand-new
-            // task; an existing note is never touched. (No parse needed; the
-            // bytes are the source.)
-            if (existing) {
-                terminal.log(`Skipping ${noteRelative} — already exists`)
-            } else {
-                await fs.promises.copyFile(UBERTASK_TEMPLATE, note)
-                terminal.log(`Seeded ${noteRelative}`)
-            }
+        // Apply the planner's note action. `skip` leaves an existing note's
+        // bytes untouched (idempotent/recovery). `seed-template` byte-copies the
+        // template into a brand-new task (no parse needed; the bytes are the
+        // source). `write` mutates the note — on an existing note IN PLACE
+        // (every other field preserved), on a fresh task from the parsed
+        // template seed — a parse → mutate → serialize round-trip, never a blind
+        // overwrite.
+        const action = plan.noteAction
+        if (action.kind === "skip") {
+            terminal.log(`Skipping ${noteRelative} — already exists`)
+        } else if (action.kind === "seed-template") {
+            await fs.promises.copyFile(UBERTASK_TEMPLATE, note)
+            terminal.log(`Seeded ${noteRelative}`)
         } else {
-            // --goal and/or a grown scope mutate the note. On an existing note,
-            // apply the changes IN PLACE (every other field is preserved). On a
-            // fresh task, start from the parsed template seed so the new note
-            // keeps the documented shape. Either way it's a parse → mutate →
-            // serialize round-trip, never a blind overwrite.
             const target =
                 existing ??
                 ubertask.parse(
                     await fs.promises.readFile(UBERTASK_TEMPLATE, "utf8")
                 )
-            if (argv.goal !== undefined) {
-                target.goal = argv.goal
+            if (action.goal !== undefined) {
+                target.goal = action.goal
             }
-            target.repos = scope
+            target.repos = action.repos
             await ubertask.write(note, target)
             // Word the line for the change that actually happened: goal wins the
             // headline when set; otherwise it's a pure scope update.
-            const what = argv.goal !== undefined ? "goal" : "scope"
+            const what = action.goal !== undefined ? "goal" : "scope"
             if (existing) {
                 terminal.log(`Updated ${what} in ${noteRelative}`)
             } else {
@@ -396,16 +226,19 @@ export default defineCommand({
         const finalNote: TaskNote | undefined = parsed
             ? { ...parsed, mtime: stat.mtimeMs }
             : undefined
-        terminal.json({
+        // The pure summary turns the run's outcomes into the JSON payload, the
+        // failed-clone/failed-hook lists, and the exit code; the shell owns the
+        // wording and pluralization of the error lines.
+        const { json, failedClones, failedHooks, exitCode } = summarize({
             task: argv.task,
             scope,
             repos,
             clone,
             hooks,
             carry,
-            // Omit the note key when absent, matching #2's omit-when-absent.
-            ...(finalNote ? { note: finalNote } : {})
+            note: finalNote
         })
+        terminal.json(json)
 
         terminal.log(
             `Opened task ${argv.task} in ${opened} ${
@@ -416,29 +249,23 @@ export default defineCommand({
         // others were still opened: summarise and exit non-zero, matching
         // clone's convention that a clone failure is never a clean run. A
         // re-run retries it — the repo stays in the scope.
-        const failedClones = clone.filter((c) => c.status === "failed")
         if (failedClones.length > 0) {
-            const which = failedClones.map((c) => c.name).join(", ")
             terminal.error(
                 `clone failed in ${failedClones.length} ${
                     failedClones.length === 1 ? "repository" : "repositories"
-                }: ${which}`
+                }: ${failedClones.join(", ")}`
             )
-            process.exitCode = 1
         }
         // A failing post-open never removes its worktree (and a failing
         // pre-open just left its repo unopened), but the run is not clean:
         // summarise and exit non-zero so a wrapper/CI sees the failure.
         if (failedHooks.length > 0) {
-            const which = failedHooks
-                .map((h) => `${h.repo} (${h.event})`)
-                .join(", ")
             terminal.error(
                 `hooks failed in ${failedHooks.length} ${
                     failedHooks.length === 1 ? "repository" : "repositories"
-                }: ${which}`
+                }: ${failedHooks.join(", ")}`
             )
-            process.exitCode = 1
         }
+        process.exitCode = exitCode || undefined
     }
 })
