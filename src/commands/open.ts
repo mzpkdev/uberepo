@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { defineCommand, terminal } from "cmdore"
+import { defineCommand, effect, terminal } from "cmdore"
 import { task } from "@/arguments/task"
 import type { CarryEntry } from "@/carry"
 import { Config, TASKS_DIR } from "@/config"
@@ -215,8 +215,12 @@ export default defineCommand({
         // Seed the task's durable note at the TASK level (sibling of the per-repo
         // worktree dirs), so it survives a fresh session as the standing "why".
         // The task dir already exists (a worktree just landed under it); mkdir -p
-        // covers the all-skipped case for safety.
-        await fs.promises.mkdir(path.dirname(note), { recursive: true })
+        // covers the all-skipped case for safety. Wrapped in effect(): under
+        // --dry-run nothing is written to disk, but the planning + projection
+        // below still run so the summary reports the note that WOULD land.
+        await effect(() =>
+            fs.promises.mkdir(path.dirname(note), { recursive: true })
+        )
         // Apply the planner's note action, with one addition: a deviating
         // branch (adopt or --branch) forces a write even when the action was
         // skip/seed-template, because the `branches:` map MUST be recorded for
@@ -226,12 +230,29 @@ export default defineCommand({
         // `seed-template` byte-copies the template into a brand-new task.
         // `write` mutates the note — on an existing note IN PLACE (every other
         // field preserved), on a fresh task from the parsed template seed.
+        //
+        // The disk MUTATION (copyFile / ubertask.write) is wrapped in effect();
+        // the in-memory `projected` note — what the note's content WOULD be — is
+        // computed OUTSIDE it, so the JSON/summary report the plan faithfully
+        // under --dry-run. The terminal wording is prefixed "Would " in dry-run.
         const action = plan.noteAction
+        const verb = effect.enabled
+            ? { skip: "Skipping", seed: "Seeded", upd: "Updated" }
+            : { skip: "Would skip", seed: "Would seed", upd: "Would update" }
+        // The note's projected final content (read back for the summary). The
+        // skip path keeps the existing note; seed-template projects the parsed
+        // template; write projects the mutated target. undefined only if no
+        // template can be read AND there is no existing note (not expected).
+        let projected: ubertask.Ubertask | undefined
         if (action.kind === "skip" && !persistBranches) {
-            terminal.log(`Skipping ${noteRelative} — already exists`)
+            terminal.log(`${verb.skip} ${noteRelative} — already exists`)
+            projected = existing
         } else if (action.kind === "seed-template" && !persistBranches) {
-            await fs.promises.copyFile(UBERTASK_TEMPLATE, note)
-            terminal.log(`Seeded ${noteRelative}`)
+            await effect(() => fs.promises.copyFile(UBERTASK_TEMPLATE, note))
+            terminal.log(`${verb.seed} ${noteRelative}`)
+            projected = ubertask.parse(
+                await fs.promises.readFile(UBERTASK_TEMPLATE, "utf8")
+            )
         } else {
             const target =
                 existing ??
@@ -252,7 +273,8 @@ export default defineCommand({
             if (persistBranches) {
                 target.branches = { ...target.branches, ...branchRecords }
             }
-            await ubertask.write(note, target)
+            await effect(() => ubertask.write(note, target))
+            projected = target
             // Word the line for the change that actually happened: goal wins the
             // headline when set, then a grown scope, else the recorded branches.
             const what =
@@ -262,20 +284,27 @@ export default defineCommand({
                       ? "scope"
                       : "branches"
             if (existing) {
-                terminal.log(`Updated ${what} in ${noteRelative}`)
+                terminal.log(`${verb.upd} ${what} in ${noteRelative}`)
             } else {
-                terminal.log(`Seeded ${noteRelative} (${what} set)`)
+                terminal.log(`${verb.seed} ${noteRelative} (${what} set)`)
             }
         }
 
-        // A note always lands on this path (seeded, copied, or updated above),
-        // so read it back with its mtime to emit the same TaskNote shape #2
-        // froze for status — the agent's open and status views then agree.
-        const parsed = await ubertask.read(note)
-        const stat = await fs.promises.stat(note)
-        const finalNote: TaskNote | undefined = parsed
-            ? { ...parsed, mtime: stat.mtimeMs }
-            : undefined
+        // The TaskNote to emit, carrying the same shape #2 froze for status so
+        // the agent's open and status views agree. A real run reads it back off
+        // disk for the true mtime; under --dry-run nothing was written, so the
+        // in-memory `projected` note is surfaced with a synthetic "now" mtime —
+        // the JSON describes the note that WOULD land, never a stale read.
+        let finalNote: TaskNote | undefined
+        if (effect.enabled) {
+            const parsed = await ubertask.read(note)
+            const stat = await fs.promises.stat(note)
+            finalNote = parsed ? { ...parsed, mtime: stat.mtimeMs } : undefined
+        } else {
+            finalNote = projected
+                ? { ...projected, mtime: Date.now() }
+                : undefined
+        }
         // The pure summary turns the run's outcomes into the JSON payload, the
         // failed-clone/failed-hook lists, and the exit code; the shell owns the
         // wording and pluralization of the error lines.
@@ -290,8 +319,11 @@ export default defineCommand({
         })
         terminal.json(json)
 
+        // The headline reports the planned count under --dry-run (nothing was
+        // actually opened); the worktrees the plan WOULD create are counted the
+        // same way, so the number is faithful either way.
         terminal.log(
-            `Opened task ${argv.task} in ${opened} ${
+            `${effect.enabled ? "Opened" : "Would open"} task ${argv.task} in ${opened} ${
                 opened === 1 ? "repository" : "repositories"
             }`
         )

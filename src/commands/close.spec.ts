@@ -171,6 +171,13 @@ describe("close command", () => {
     const taskDir = (task: string, name: string): string =>
         path.join(root, "tasks", task, name)
 
+    // The task root <root>/tasks/<task> and its durable note
+    // <root>/tasks/<task>/ubertask.yml — close must remove BOTH once the task is
+    // fully torn down, and keep both alive while any in-scope repo refuses.
+    const taskRoot = (task: string): string => path.join(root, "tasks", task)
+    const notePath = (task: string): string =>
+        path.join(root, "tasks", task, "ubertask.yml")
+
     // Write a ubertask.yml at the task level declaring a scope (the repos: the
     // task owns), so close can be exercised against a scoped task.
     const writeScope = async (task: string, repos: string[]): Promise<void> => {
@@ -279,6 +286,47 @@ describe("close command", () => {
         expect(joined).toContain("api: closed")
         expect(joined).toContain("web: closed")
         expect(joined).toContain("Closed task alpha in 2 repositories")
+    })
+
+    it("a fully-successful close removes the durable note and the task dir", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        await openWorktree("api", "alpha")
+        await openWorktree("web", "alpha")
+        // A scoped note that owns exactly the two open repos — fully closeable.
+        await writeScope("alpha", ["api", "web"])
+        expect(fs.existsSync(notePath("alpha"))).toBe(true)
+
+        await captureOutput(async () => {
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
+        })
+
+        // Every in-scope repo closed, so the note dies with the task: both the
+        // ubertask.yml and the now-empty task dir are gone.
+        expect(fs.existsSync(notePath("alpha"))).toBe(false)
+        expect(fs.existsSync(taskRoot("alpha"))).toBe(false)
+    })
+
+    it("keeps the note when a repo is skipped, so the task survives for a retry", async () => {
+        await makeSource("api")
+        await register(["api"])
+        const wt = await openWorktree("api", "alpha")
+        await writeScope("alpha", ["api"])
+        // Dirty worktree -> the only in-scope repo is skipped, so close left a
+        // worktree standing: the task is NOT closed and the note must survive.
+        await fsp.writeFile(path.join(wt, "README.md"), "uncommitted\n")
+        expect(fs.existsSync(notePath("alpha"))).toBe(true)
+
+        const { logs } = await captureOutput(async () => {
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
+        })
+
+        // Nothing closed -> note + dir + worktree all still here for the retry.
+        expect(logs.join("\n")).toContain("Skipped 1 repository")
+        expect(fs.existsSync(taskDir("alpha", "api"))).toBe(true)
+        expect(fs.existsSync(notePath("alpha"))).toBe(true)
+        expect(fs.existsSync(taskRoot("alpha"))).toBe(true)
     })
 
     it("respects a declared scope: closes in-scope repos and warns about a stray worktree", async () => {

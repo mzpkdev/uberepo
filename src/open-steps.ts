@@ -1,6 +1,6 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { terminal } from "cmdore"
+import { effect, terminal } from "cmdore"
 import { type CarryEntry, runCarry } from "@/carry"
 import { repositoryUrl, TASKS_DIR, type UberepoConfig } from "@/config"
 import { currentGh, ghAvailable, prView } from "@/forge"
@@ -111,13 +111,35 @@ export const openRepoWorktree = async (
     // never adds an uncloned target on its own, so it still never clones
     // implicitly.
     if (!fs.existsSync(source)) {
-        const outcome = await cloneSource({
-            config: ctx.config,
-            root: ctx.root,
-            name,
-            url: ctx.urlByName.get(name) ?? "",
-            noHooks: ctx.noHooks
-        })
+        // Under --dry-run the clone (git clone + its pre/post-clone hooks) is a
+        // mutation, so it stays inside effect() and never runs — but the PLAN
+        // must still report it. effect() resolves undefined when disabled, so
+        // we fall back to a synthetic "would-clone" outcome: a clone entry the
+        // summary surfaces, no hooks fired, and the open below proceeds against
+        // the would-be source. A real run gets the actual CloneOutcome.
+        const outcome = (await effect(() =>
+            cloneSource({
+                config: ctx.config,
+                root: ctx.root,
+                name,
+                url: ctx.urlByName.get(name) ?? "",
+                noHooks: ctx.noHooks
+            })
+        )) as Awaited<ReturnType<typeof cloneSource>> | undefined
+        if (outcome === undefined) {
+            // Dry-run: report the planned clone (no hooks fire, nothing lands on
+            // disk) and plan the worktree against the would-be clone. A repo
+            // with no clone on disk can't be probed for an existing branch, so
+            // openCloned plans a fresh CREATE on the resolved branch name — the
+            // faithful common-case outcome for a brand-new clone.
+            return await openCloned(name, ctx, {
+                source,
+                dest,
+                relative,
+                hooks,
+                clone: { name, status: "cloned" }
+            })
+        }
         for (const hook of outcome.hooks) {
             hooks.push(hook)
         }
@@ -184,28 +206,40 @@ const openCloned = async (
     // per-repo / all-repos name, else the task/<task> default. Then decide
     // adopt-or-create from whether that branch already exists locally or only
     // on origin — the one genuinely new git mechanic, kept in the pure planner.
+    // These are READS (git rev-parse), so they always run, INCLUDING under
+    // --dry-run — the plan needs the real adopt-or-create decision. The one
+    // exception is the dry-run on-demand-clone path: `source` does not exist on
+    // disk (the clone is the skipped mutation), so there is nothing to probe and
+    // the faithful plan is a fresh CREATE on the resolved name.
     const branch = branchNameFor(ctx.branchSpec, name, taskBranch(ctx.task))
-    const mode = resolveBranchMode({
-        local: await repo.branchExists(branch),
-        remote: await repo.remoteBranchExists(branch)
-    })
+    const mode = fs.existsSync(source)
+        ? resolveBranchMode({
+              local: await repo.branchExists(branch),
+              remote: await repo.remoteBranchExists(branch)
+          })
+        : ({ mode: "create", track: false } as const)
     // pre-open GATES the worktree: a non-zero exit skips this repo (no worktree
     // is created), the run continues, and the command exits non-zero at the end.
     // The worktree does not exist yet, so the hook runs in the repo's source
-    // clone while UBEREPO_REPO_PATH names the would-be worktree.
-    const pre = await runHook("pre-open", {
-        config: ctx.config,
-        workspace: ctx.root,
-        task: ctx.task,
-        cwd: source,
-        repo: {
-            name,
-            path: dest,
-            url: ctx.urlByName.get(name) ?? "",
-            branch
-        },
-        noHooks: ctx.noHooks
-    })
+    // clone while UBEREPO_REPO_PATH names the would-be worktree. Firing a hook
+    // is a side effect, so it lives inside effect(): under --dry-run it does not
+    // fire (resolves undefined), the gate is skipped, and the plan reports the
+    // worktree this open WOULD create.
+    const pre = (await effect(() =>
+        runHook("pre-open", {
+            config: ctx.config,
+            workspace: ctx.root,
+            task: ctx.task,
+            cwd: source,
+            repo: {
+                name,
+                path: dest,
+                url: ctx.urlByName.get(name) ?? "",
+                branch
+            },
+            noHooks: ctx.noHooks
+        })
+    )) as HookResult | undefined
     if (pre) {
         hooks.push(pre)
         if (pre.exit !== 0) {
@@ -222,36 +256,50 @@ const openCloned = async (
             }
         }
     }
-    // Fail-fast: a creation error propagates, stopping before any later repo is
-    // touched; already-created worktrees stay put. CREATE cuts a fresh branch
-    // off the base; ADOPT attaches the worktree to the existing branch (with
-    // tracking set up when it lives only on origin).
+    // The terminal line describes the planned action; under --dry-run it is
+    // prefixed so a human reads it as a preview, not a fait accompli. The
+    // wording is OUTSIDE effect() — the plan must always be surfaced — while the
+    // worktree creation it describes is INSIDE.
+    const verb = effect.enabled ? "Opening" : "Would open"
     if (mode.mode === "adopt") {
         terminal.log(
-            `Opening ${name} → ${relative} (adopting ${branch}${
+            `${verb} ${name} → ${relative} (adopting ${branch}${
                 mode.track ? " from origin" : ""
             })`
         )
-        await repo
-            .worktree(dest)
-            .create({ branch, attach: true, track: mode.track })
     } else {
         terminal.log(
-            `Opening ${name} → ${relative} (${branch} from ${ctx.base})`
+            `${verb} ${name} → ${relative} (${branch} from ${ctx.base})`
         )
-        await repo.worktree(dest).create({ branch, from: ctx.base })
     }
-    // Record what landed for the note's `branches:` map. A created branch
-    // carries no base (consumers fall back to remoteDefault); an adopted branch
-    // discovers its base from the head's open PR (gh) when there is one — that
-    // base is what sync/diff/ship will rebase/compare/target against, the
+    // Fail-fast: a creation error propagates, stopping before any later repo is
+    // touched; already-created worktrees stay put. CREATE cuts a fresh branch
+    // off the base; ADOPT attaches the worktree to the existing branch (with
+    // tracking set up when it lives only on origin). The mutation is wrapped in
+    // effect() — under --dry-run no worktree/branch is created, but the result
+    // below still reports it as `created`.
+    await effect(() => {
+        if (mode.mode === "adopt") {
+            return repo
+                .worktree(dest)
+                .create({ branch, attach: true, track: mode.track })
+        }
+        return repo.worktree(dest).create({ branch, from: ctx.base })
+    })
+    // Record what WOULD/DID land for the note's `branches:` map. A created
+    // branch carries no base (consumers fall back to remoteDefault); an adopted
+    // branch discovers its base from the head's open PR (gh) when there is one —
+    // that base is what sync/diff/ship will rebase/compare/target against, the
     // escape from flattening a stacked branch onto remoteDefault. A hand-fed
-    // --branch base is NOT inferred here; discovery is PR-only.
+    // --branch base is NOT inferred here; discovery is PR-only. Discovery is a
+    // READ, but it queries gh in the worktree dir, which only exists once the
+    // worktree was actually created — so it is gated on effect.enabled too,
+    // leaving the dry-run plan to record the adopted branch with no base.
     const recorded: UbertaskBranch = {
         name: branch,
         adopted: mode.mode === "adopt"
     }
-    if (mode.mode === "adopt") {
+    if (mode.mode === "adopt" && effect.enabled) {
         const base = await discoverBase(dest, branch)
         if (base !== undefined) {
             recorded.base = base
@@ -260,32 +308,40 @@ const openCloned = async (
     let carry: CarryEntry | undefined
     // Carry the configured untracked local files (.env and friends) from the
     // source clone into the fresh worktree BEFORE post-open fires, so a hook
-    // like `npm ci && db:migrate` finds them in place.
-    const carried = await runCarry({
-        config: ctx.config,
-        name,
-        source,
-        worktree: dest
-    })
+    // like `npm ci && db:migrate` finds them in place. Copying files is a
+    // mutation (and reads the worktree, which only exists after a real create),
+    // so it is wrapped in effect(): a dry-run copies nothing and records no
+    // carry entry.
+    const carried = (await effect(() =>
+        runCarry({
+            config: ctx.config,
+            name,
+            source,
+            worktree: dest
+        })
+    )) as Awaited<ReturnType<typeof runCarry>> | undefined
     if (carried) {
         carry = { repo: name, ...carried }
     }
     // post-open fires for the NEWLY-created worktree only, with cwd = the
     // worktree and branch = the resolved branch (task/<task> by default, or the
     // adopted/--branch name). A hook failure is recorded and the run
-    // continues — the worktree already exists.
-    const result = await runHook("post-open", {
-        config: ctx.config,
-        workspace: ctx.root,
-        task: ctx.task,
-        repo: {
-            name,
-            path: dest,
-            url: ctx.urlByName.get(name) ?? "",
-            branch
-        },
-        noHooks: ctx.noHooks
-    })
+    // continues — the worktree already exists. Wrapped in effect(): a dry-run
+    // fires no hook and records none.
+    const result = (await effect(() =>
+        runHook("post-open", {
+            config: ctx.config,
+            workspace: ctx.root,
+            task: ctx.task,
+            repo: {
+                name,
+                path: dest,
+                url: ctx.urlByName.get(name) ?? "",
+                branch
+            },
+            noHooks: ctx.noHooks
+        })
+    )) as HookResult | undefined
     if (result) {
         hooks.push(result)
     }

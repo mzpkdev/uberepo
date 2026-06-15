@@ -15,6 +15,13 @@ export const worktreePath = (
     name: string
 ): string => path.join(root, TASKS_DIR, task, name)
 
+// The on-disk root of a task: <root>/tasks/<task> — the dir holding the durable
+// note (ubertask.yml) and, as siblings, the per-repo worktree dirs. close
+// removes it once every in-scope worktree is torn down, so the note dies with
+// the task.
+export const taskPath = (root: string, task: string): string =>
+    path.join(root, TASKS_DIR, task)
+
 // The branch convention a task's worktrees live on, by default. A repo can
 // override this (adopt a pre-existing branch) — see branchFor.
 export const taskBranch = (task: string): string => `task/${task}`

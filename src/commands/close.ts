@@ -13,6 +13,7 @@ import {
     branchFor,
     partitionScope,
     readNote,
+    taskPath,
     worktreePath
 } from "@/tasks"
 import { normalizeRepository } from "@/url"
@@ -257,6 +258,29 @@ export default defineCommand({
                     skipped === 1 ? "repository" : "repositories"
                 } with unsafe changes — use --force to close anyway.`
             )
+        }
+
+        // The durable note dies with the task — but only when the task is TRULY
+        // fully closed. Every in-scope repo must have actually closed (no
+        // dirty/unmerged skip, no failed pre-close gate left a worktree
+        // standing), so we key off `repos` rather than the `skipped` counter,
+        // which a pre-close failure never increments. And NO stray may remain:
+        // a stray worktree lives at tasks/<task>/<name>, physically inside the
+        // task dir, so removing the dir would silently destroy a worktree we
+        // deliberately left standing. When both hold, drop the whole task dir
+        // (ubertask.yml + the now-empty per-repo slots); otherwise keep it so a
+        // retry — and `open` — still finds the note. A failing POST-close does
+        // not block this: by then the worktree is already gone, so that repo is
+        // closed and `status: "closed"`; the note has no reason to survive it.
+        const fullyClosed =
+            repos.length > 0 &&
+            repos.every((r) => r.status === "closed") &&
+            strays.length === 0
+        if (fullyClosed) {
+            await fs.promises.rm(taskPath(root, argv.task), {
+                recursive: true,
+                force: true
+            })
         }
         // A failing post-close can't resurrect the worktree (and a failing
         // pre-close deliberately left its repo open), but the run is not

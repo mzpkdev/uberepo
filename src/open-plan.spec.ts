@@ -490,6 +490,43 @@ describe("validateBranchScope — a per-repo branch must be in scope", () => {
     })
 })
 
+// The #2 backstop: a repo the user EXPLICITLY named via --branch <repo>=<name>
+// must NEVER be silently honoured as task/<task>. Two guards enforce this in
+// tandem — validateBranchScope errors loudly when the named repo can't be
+// honoured (it isn't an open target), and branchNameFor only ever falls back to
+// the task default for a repo the user did NOT name. Together they make a silent
+// wrong-branch impossible: a named repo either gets its name or fails the run.
+describe("no-silent-default backstop for a named --branch repo", () => {
+    it("errors loudly (never silently defaults) when the named repo is outside the open's scope", () => {
+        // The user asked for cli=feat/x, but cli is not a target this run —
+        // honouring task/<task> instead would be a silent wrong-branch, so the
+        // run must abort, naming what IS in scope.
+        expect(() =>
+            validateBranchScope({ perRepo: { cli: "feat/x" } }, ["api", "web"])
+        ).toThrow(
+            "--branch cli=feat/x names a repo outside this open's scope — in scope: api, web"
+        )
+    })
+
+    it("reports (none in scope) when no repo can carry the named branch", () => {
+        // An empty target set (e.g. nothing cloned) still fails loud rather than
+        // dropping the --branch on the floor.
+        expect(() =>
+            validateBranchScope({ perRepo: { api: "feat/x" } }, [])
+        ).toThrow("in scope: (none in scope)")
+    })
+
+    it("branchNameFor never returns the task default for a repo the user named", () => {
+        // Once validateBranchScope has passed, every named repo resolves to ITS
+        // name — the task/<task> fallback is reachable only for an UNnamed repo.
+        const spec = { perRepo: { api: "feat/x" } }
+        expect(branchNameFor(spec, "api", "task/t")).toBe("feat/x")
+        expect(branchNameFor(spec, "api", "task/t")).not.toBe("task/t")
+        // An unnamed repo (web) is the ONLY case that falls back to the default.
+        expect(branchNameFor(spec, "web", "task/t")).toBe("task/t")
+    })
+})
+
 describe("resolveBranchMode — the adopt-or-create decision", () => {
     it("a local branch → ADOPT, no tracking change", () => {
         expect(resolveBranchMode({ local: true, remote: false })).toEqual({
