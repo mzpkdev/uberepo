@@ -183,6 +183,83 @@ describe("close command", () => {
         )
     }
 
+    // Open a worktree on a PRE-EXISTING branch `branch` (not task/<task>) and
+    // record it as ADOPTED in the note — the data-loss case close must never
+    // delete the branch for.
+    const adoptWorktree = async (
+        name: string,
+        task: string,
+        branch: string
+    ): Promise<string> => {
+        const source = path.join(root, "source", name)
+        await sh(source, "branch", branch, "main")
+        const wt = path.join(root, "tasks", task, name)
+        await sh(source, "worktree", "add", wt, branch)
+        const dir = path.join(root, "tasks", task)
+        await fsp.writeFile(
+            path.join(dir, "ubertask.yml"),
+            `goal: |\n  g\n\nbranches:\n  ${name}:\n    name: ${branch}\n    adopted: true\n`
+        )
+        return wt
+    }
+
+    // Whether the local branch `branch` still exists in source repo `name`.
+    const namedBranchExists = async (
+        name: string,
+        branch: string
+    ): Promise<boolean> => {
+        const source = path.join(root, "source", name)
+        try {
+            await sh(
+                source,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                `refs/heads/${branch}`
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    it("ADOPTED branch: removes the worktree but never deletes the branch", async () => {
+        await makeSource("api")
+        await register(["api"])
+        const wt = await adoptWorktree("api", "alpha", "feature/login")
+
+        const { logs } = await captureOutput(async () => {
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
+        })
+
+        // The worktree is gone, the task is closed — but the adopted branch
+        // SURVIVES (never close's to delete), and the merged-check was moot.
+        expect(fs.existsSync(wt)).toBe(false)
+        expect(await namedBranchExists("api", "feature/login")).toBe(true)
+        const joined = logs.join("\n")
+        expect(joined).toContain("api: kept adopted branch feature/login")
+        expect(joined).toContain("api: closed")
+    })
+
+    it("ADOPTED branch survives even an unmerged tip without --force", async () => {
+        await makeSource("api")
+        await register(["api"])
+        const wt = await adoptWorktree("api", "alpha", "feature/login")
+        // Commit on the adopted branch so its tip is NOT merged into origin/main
+        // — a created branch here would be skipped as "unmerged commits", but an
+        // adopted one closes (worktree removed) and keeps its branch.
+        await fsp.writeFile(path.join(wt, "x.txt"), "work\n")
+        await sh(wt, "add", "x.txt")
+        await sh(wt, "commit", "-m", "adopted work")
+
+        await captureOutput(async () => {
+            await close.run({ task: "alpha", force: false, "no-hooks": false })
+        })
+
+        expect(fs.existsSync(wt)).toBe(false)
+        expect(await namedBranchExists("api", "feature/login")).toBe(true)
+    })
+
     it("closes a fully-merged task: removes every worktree and deletes the branch", async () => {
         await makeSource("api")
         await makeSource("web")

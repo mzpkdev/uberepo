@@ -28,7 +28,7 @@ import { noHooks } from "@/options/no-hooks"
 import { noPr } from "@/options/no-pr"
 import { repos } from "@/options/repos"
 import { title } from "@/options/title"
-import { taskBranch, UBERTASK_FILENAME, worktreePath } from "@/tasks"
+import { baseFor, branchFor, UBERTASK_FILENAME, worktreePath } from "@/tasks"
 import * as ubertask from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
@@ -57,12 +57,14 @@ type ShipRepo = {
 }
 
 // A repo that passed pre-flight (clean, ahead of base) and is ready to push:
-// its flat name, source repo, worktree, the gh-facing base branch, and the
-// mutable outcome it writes its result into.
+// its flat name, source repo, worktree, the branch to push (adopted/--branch,
+// else task/<task>), the gh-facing base branch, and the mutable outcome it
+// writes its result into.
 type Pending = {
     name: string
     source: string
     dest: string
+    branch: string
     ghBase: string
     out: ShipRepo
 }
@@ -95,7 +97,6 @@ export default defineCommand({
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
-        const branch = taskBranch(argv.task)
         const run: Gh = currentGh()
 
         // Registered URL per flat name, so a fired hook can surface it as
@@ -209,10 +210,17 @@ export default defineCommand({
             const dest = worktreePath(root, argv.task, name)
             const repo = git(source)
             const wt = repo.worktree(dest)
+            // This repo's branch to push (adopted/--branch, else task/<task>).
+            const branch = branchFor(argv.task, name, note?.branches)
 
-            // Resolve this repo's base: --base wins; else its remote default.
-            // No remote default and no --base → can't compute "ahead", skip.
-            const baseRef = argv.base ?? (await repo.remoteDefault())
+            // Resolve this repo's base: --base wins; then the persisted per-repo
+            // base (an adopted branch's PR base — so "ahead" counts against the
+            // PR's real target, not a flattened remoteDefault); else its remote
+            // default. No base at all → can't compute "ahead", skip.
+            const baseRef =
+                argv.base ??
+                baseFor(name, note?.branches) ??
+                (await repo.remoteDefault())
             if (!baseRef) {
                 results.push({
                     name,
@@ -240,7 +248,7 @@ export default defineCommand({
                 continue
             }
 
-            // "ahead of base": any commit on task/<task> not in baseRef. None →
+            // "ahead of base": any commit on the branch not in baseRef. None →
             // nothing to ship (GitHub rejects an empty PR), so skip.
             const ahead = await countAhead(repo, baseRef, branch)
             if (ahead === 0) {
@@ -266,6 +274,7 @@ export default defineCommand({
                 name,
                 source,
                 dest,
+                branch,
                 ghBase: ghBaseName(baseRef),
                 out
             })
@@ -289,7 +298,7 @@ export default defineCommand({
                     name: item.name,
                     path: item.dest,
                     url: urlByName.get(item.name) ?? "",
-                    branch
+                    branch: item.branch
                 },
                 noHooks: argv["no-hooks"]
             })
@@ -309,9 +318,9 @@ export default defineCommand({
             const repo = git(item.source)
             const wt = repo.worktree(item.dest)
             try {
-                await wt.push(branch, { force: argv.force })
+                await wt.push(item.branch, { force: argv.force })
                 item.out.pushed = true
-                terminal.log(`${item.name}: pushed ${branch}`)
+                terminal.log(`${item.name}: pushed ${item.branch}`)
             } catch (error) {
                 fail(item.out, pushError(error, argv.force))
                 continue
@@ -321,7 +330,11 @@ export default defineCommand({
             // once pushed, and post-ship below fires with no PR URL.
             if (!argv["no-pr"]) {
                 try {
-                    const existing = await findOpenPr(run, item.dest, branch)
+                    const existing = await findOpenPr(
+                        run,
+                        item.dest,
+                        item.branch
+                    )
                     if (existing) {
                         // PR already open: push already refreshed it — do NOT
                         // edit its title or body (never clobber human edits).
@@ -341,7 +354,7 @@ export default defineCommand({
                         try {
                             url = await prCreate(run, item.dest, {
                                 base: item.ghBase,
-                                head: branch,
+                                head: item.branch,
                                 title: resolvedTitle,
                                 bodyFile: tmp
                             })
@@ -374,7 +387,7 @@ export default defineCommand({
                         name: item.name,
                         path: item.dest,
                         url: urlByName.get(item.name) ?? "",
-                        branch
+                        branch: item.branch
                     },
                     noHooks: argv["no-hooks"]
                 })

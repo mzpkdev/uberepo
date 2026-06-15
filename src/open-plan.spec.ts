@@ -1,8 +1,12 @@
 import {
+    branchNameFor,
     type OpenInput,
     type OpenOutcomes,
+    parseBranchSpecs,
     planOpen,
+    resolveBranchMode,
     summarize,
+    validateBranchScope,
     validateSuppliedRepos
 } from "@/open-plan"
 
@@ -354,6 +358,7 @@ describe("summarize", () => {
         const note = {
             goal: "g",
             repos: [],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: [],
@@ -401,5 +406,116 @@ describe("summarize", () => {
         expect(failedClones).toEqual(["api"])
         expect(failedHooks).toEqual(["api (post-clone)"])
         expect(exitCode).toBe(1)
+    })
+})
+
+describe("parseBranchSpecs — the two --branch forms", () => {
+    it("undefined → an empty spec (every repo falls back to task/<task>)", () => {
+        expect(parseBranchSpecs(undefined)).toEqual({ perRepo: {} })
+    })
+
+    it("a bare name sets `all` (every in-scope repo)", () => {
+        expect(parseBranchSpecs(["feat/sso"])).toEqual({
+            all: "feat/sso",
+            perRepo: {}
+        })
+    })
+
+    it("repeatable <repo>=<name> tokens fill perRepo", () => {
+        expect(parseBranchSpecs(["api=feat/x", "web=feat/y"])).toEqual({
+            perRepo: { api: "feat/x", web: "feat/y" }
+        })
+    })
+
+    it("a branch name may itself contain `=` after the first one", () => {
+        // Only the FIRST `=` splits repo from name, so a branch with `=` works.
+        expect(parseBranchSpecs(["api=feat/a=b"])).toEqual({
+            perRepo: { api: "feat/a=b" }
+        })
+    })
+
+    it("rejects mixing a bare name with <repo>=<name> entries", () => {
+        expect(() => parseBranchSpecs(["all", "api=x"])).toThrow(
+            "mixes a bare name"
+        )
+    })
+
+    it("rejects two bare names", () => {
+        expect(() => parseBranchSpecs(["a", "b"])).toThrow(
+            "more than one bare branch name"
+        )
+    })
+
+    it("rejects two branches for the same repo", () => {
+        expect(() => parseBranchSpecs(["api=x", "api=y"])).toThrow(
+            "two branches for api"
+        )
+    })
+
+    it("rejects a malformed <repo>= with an empty side", () => {
+        expect(() => parseBranchSpecs(["=x"])).toThrow("malformed")
+        expect(() => parseBranchSpecs(["api="])).toThrow("malformed")
+    })
+})
+
+describe("branchNameFor — resolving one repo's branch from a spec", () => {
+    it("prefers the per-repo entry, then the bare all, then the fallback", () => {
+        const spec = { all: "all/b", perRepo: { api: "api/b" } }
+        expect(branchNameFor(spec, "api", "task/t")).toBe("api/b")
+        expect(branchNameFor(spec, "web", "task/t")).toBe("all/b")
+        expect(branchNameFor({ perRepo: {} }, "web", "task/t")).toBe("task/t")
+    })
+})
+
+describe("validateBranchScope — a per-repo branch must be in scope", () => {
+    it("passes when every per-repo branch names an in-scope target", () => {
+        expect(() =>
+            validateBranchScope({ perRepo: { api: "x", web: "y" } }, [
+                "api",
+                "web"
+            ])
+        ).not.toThrow()
+    })
+
+    it("throws when a per-repo branch names a repo outside the targets", () => {
+        expect(() =>
+            validateBranchScope({ perRepo: { cli: "x" } }, ["api", "web"])
+        ).toThrow("names a repo outside this open's scope")
+    })
+
+    it("ignores the bare-name form (it applies to whatever IS in scope)", () => {
+        expect(() =>
+            validateBranchScope({ all: "x", perRepo: {} }, [])
+        ).not.toThrow()
+    })
+})
+
+describe("resolveBranchMode — the adopt-or-create decision", () => {
+    it("a local branch → ADOPT, no tracking change", () => {
+        expect(resolveBranchMode({ local: true, remote: false })).toEqual({
+            mode: "adopt",
+            track: false
+        })
+    })
+
+    it("a branch only on origin → ADOPT + TRACK", () => {
+        expect(resolveBranchMode({ local: false, remote: true })).toEqual({
+            mode: "adopt",
+            track: true
+        })
+    })
+
+    it("a branch that exists nowhere → CREATE", () => {
+        expect(resolveBranchMode({ local: false, remote: false })).toEqual({
+            mode: "create",
+            track: false
+        })
+    })
+
+    it("a local branch wins even when it also exists on origin (adopt, no re-track)", () => {
+        expect(resolveBranchMode({ local: true, remote: true })).toEqual({
+            mode: "adopt",
+            track: false
+        })
     })
 })

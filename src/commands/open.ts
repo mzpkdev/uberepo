@@ -7,11 +7,14 @@ import { Config, TASKS_DIR } from "@/config"
 import type { HookResult } from "@/hooks"
 import {
     type OpenRepo,
+    parseBranchSpecs,
     planOpen,
     summarize,
+    validateBranchScope,
     validateSuppliedRepos
 } from "@/open-plan"
 import { collectSources, openRepoWorktree } from "@/open-steps"
+import { branch as branchOpt } from "@/options/branch"
 import { from } from "@/options/from"
 import { goal } from "@/options/goal"
 import { noHooks } from "@/options/no-hooks"
@@ -24,6 +27,7 @@ import {
     UBERTASK_FILENAME,
     worktreePath
 } from "@/tasks"
+import type { UbertaskBranch } from "@/ubertask"
 import * as ubertask from "@/ubertask"
 
 // The seed ubertask.yml lives in the package's real template/ dir and is
@@ -38,13 +42,19 @@ export default defineCommand({
     description:
         "Open a task, creating its worktree in every source repository",
     arguments: [task],
-    options: [from, goal, repos, noHooks],
+    options: [from, goal, repos, branchOpt, noHooks],
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
-        const branch = taskBranch(argv.task)
-        // Omitting --from branches each worktree off its clone's current HEAD.
+        // Omitting --from branches each CREATED worktree off its clone's
+        // current HEAD; an ADOPTED branch ignores this (it checks out the
+        // existing branch's own tip).
         const base = argv.from ?? "HEAD"
+        // The resolved --branch spec (both forms, validated for format up
+        // front). The per-repo adopt-or-create decision happens inside each
+        // open step; here it is only parsed and — once targets are known —
+        // validated against the scope.
+        const branchSpec = parseBranchSpecs(argv.branch)
 
         // The registered flat names (registration order) with their URLs, and
         // which of them are already cloned, read off disk. Whether an uncloned
@@ -90,6 +100,11 @@ export default defineCommand({
             goal: argv.goal
         })
         const scope = plan.scope
+
+        // A `--branch <repo>=<name>` for a repo this open won't touch is an
+        // error (fail loud, create nothing — like the unknown-name guard).
+        // Checked against the worktree targets, the repos a branch can apply to.
+        validateBranchScope(branchSpec, plan.targets)
 
         // Warn + skip the uncloned repos this run will NOT touch (registered
         // but outside the targets), the way status does, so a partially-cloned
@@ -159,11 +174,16 @@ export default defineCommand({
             config,
             root,
             task: argv.task,
-            branch,
+            branchSpec,
             base,
             urlByName,
             noHooks: argv["no-hooks"]
         }
+        // The branches each newly-created worktree landed on, keyed by repo —
+        // collected from the step outcomes to persist in the note's `branches:`
+        // map. Only `created` repos carry one; a skip (already open, hook gate,
+        // failed clone) records nothing this run.
+        const branchRecords: Record<string, UbertaskBranch> = {}
         for (const name of plan.targets) {
             const out = await openRepoWorktree(name, ctx)
             repos.push(out.repo)
@@ -177,24 +197,39 @@ export default defineCommand({
             if (out.opened) {
                 opened += 1
             }
+            if (out.branch) {
+                branchRecords[name] = out.branch
+            }
         }
+
+        // A branch record is worth persisting only when it deviates from the
+        // pure task/<task> default: an adopted branch, OR a created branch with
+        // a non-default name (an explicit --branch). A plain `open` that just
+        // cut task/<task> in every repo records nothing — preserving the
+        // no-clobber/idempotent note contract (a bare re-open never rewrites a
+        // hand-edited note). branchFor() falls back to task/<task> for those.
+        const persistBranches = Object.values(branchRecords).some(
+            (b) => b.adopted || b.name !== taskBranch(argv.task)
+        )
 
         // Seed the task's durable note at the TASK level (sibling of the per-repo
         // worktree dirs), so it survives a fresh session as the standing "why".
         // The task dir already exists (a worktree just landed under it); mkdir -p
         // covers the all-skipped case for safety.
         await fs.promises.mkdir(path.dirname(note), { recursive: true })
-        // Apply the planner's note action. `skip` leaves an existing note's
-        // bytes untouched (idempotent/recovery). `seed-template` byte-copies the
-        // template into a brand-new task (no parse needed; the bytes are the
-        // source). `write` mutates the note — on an existing note IN PLACE
-        // (every other field preserved), on a fresh task from the parsed
-        // template seed — a parse → mutate → serialize round-trip, never a blind
-        // overwrite.
+        // Apply the planner's note action, with one addition: a deviating
+        // branch (adopt or --branch) forces a write even when the action was
+        // skip/seed-template, because the `branches:` map MUST be recorded for
+        // close/prune/sync to know which branch each repo is on and whether it
+        // was adopted. `skip` leaves an existing note's bytes untouched
+        // (idempotent/recovery) ONLY when nothing branch-worthy landed.
+        // `seed-template` byte-copies the template into a brand-new task.
+        // `write` mutates the note — on an existing note IN PLACE (every other
+        // field preserved), on a fresh task from the parsed template seed.
         const action = plan.noteAction
-        if (action.kind === "skip") {
+        if (action.kind === "skip" && !persistBranches) {
             terminal.log(`Skipping ${noteRelative} — already exists`)
-        } else if (action.kind === "seed-template") {
+        } else if (action.kind === "seed-template" && !persistBranches) {
             await fs.promises.copyFile(UBERTASK_TEMPLATE, note)
             terminal.log(`Seeded ${noteRelative}`)
         } else {
@@ -203,14 +238,29 @@ export default defineCommand({
                 ubertask.parse(
                     await fs.promises.readFile(UBERTASK_TEMPLATE, "utf8")
                 )
-            if (action.goal !== undefined) {
+            if (action.kind === "write" && action.goal !== undefined) {
                 target.goal = action.goal
             }
-            target.repos = action.repos
+            if (action.kind === "write") {
+                target.repos = action.repos
+            }
+            // Record the deviating branches (adopt / --branch) only — merging
+            // over any already stored, so a re-open that adopts a new repo adds
+            // to the map without dropping branches recorded earlier. A plain
+            // created task/<task> is NOT written (branchFor falls back to it),
+            // keeping the note free of redundant default entries.
+            if (persistBranches) {
+                target.branches = { ...target.branches, ...branchRecords }
+            }
             await ubertask.write(note, target)
             // Word the line for the change that actually happened: goal wins the
-            // headline when set; otherwise it's a pure scope update.
-            const what = action.goal !== undefined ? "goal" : "scope"
+            // headline when set, then a grown scope, else the recorded branches.
+            const what =
+                action.kind === "write" && action.goal !== undefined
+                    ? "goal"
+                    : action.kind === "write"
+                      ? "scope"
+                      : "branches"
             if (existing) {
                 terminal.log(`Updated ${what} in ${noteRelative}`)
             } else {

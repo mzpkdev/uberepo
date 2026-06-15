@@ -3,11 +3,18 @@ import * as path from "node:path"
 import { terminal } from "cmdore"
 import { type CarryEntry, runCarry } from "@/carry"
 import { repositoryUrl, TASKS_DIR, type UberepoConfig } from "@/config"
+import { currentGh, ghAvailable, prView } from "@/forge"
 import git from "@/git"
 import { type HookResult, runHook } from "@/hooks"
-import type { OpenRepo } from "@/open-plan"
+import {
+    type BranchSpec,
+    branchNameFor,
+    type OpenRepo,
+    resolveBranchMode
+} from "@/open-plan"
 import { type CloneRepo, cloneSource } from "@/sources"
-import { worktreePath } from "@/tasks"
+import { taskBranch, worktreePath } from "@/tasks"
+import type { UbertaskBranch } from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
 // The EFFECTFUL per-repo machinery of `open`, lifted out of the command's
@@ -46,15 +53,17 @@ export const collectSources = (
 }
 
 // Everything openRepoWorktree closes over from the command's run(): the
-// workspace config and root, the task and its derived branch/base, the
-// name→URL map (for the on-demand clone and the hooks' UBEREPO_REPO_URL), and
-// the --no-hooks flag. The per-iteration locals (source/dest/relative) are
-// derived inside the step from name + root + task.
+// workspace config and root, the task, the resolved `--branch` spec (per-repo
+// branch names, adopt-or-create resolved per repo inside the step), the
+// fallback base for a CREATED branch (--from, else HEAD — adopted branches
+// discover their base from the PR), the name→URL map (for the on-demand clone
+// and the hooks' UBEREPO_REPO_URL), and the --no-hooks flag. The per-iteration
+// locals (source/dest/relative/branch) are derived inside the step.
 export type OpenStepCtx = {
     config: UberepoConfig
     root: string
     task: string
-    branch: string
+    branchSpec: BranchSpec
     base: string
     urlByName: Map<string, string>
     noHooks?: boolean
@@ -71,6 +80,12 @@ export type OpenStepResult = {
     hooks: HookResult[]
     carry?: CarryEntry
     opened: boolean
+    // The branch this repo's worktree landed on (adopt-or-create), so the
+    // shell can persist it in the note's `branches:` map. Present only when a
+    // worktree actually landed this run (the `created` path); every skip path
+    // omits it. Kept OFF OpenRepo so the JSON `repos[]` shape is unchanged —
+    // the branch record is an internal carrier for the note write.
+    branch?: UbertaskBranch
 }
 
 // Open (and, on demand, clone) one target repo's worktree — the command's old
@@ -164,6 +179,16 @@ const openCloned = async (
             opened: false
         }
     }
+    const repo = git(source)
+    // The branch this repo's worktree will live on: the --branch spec's
+    // per-repo / all-repos name, else the task/<task> default. Then decide
+    // adopt-or-create from whether that branch already exists locally or only
+    // on origin — the one genuinely new git mechanic, kept in the pure planner.
+    const branch = branchNameFor(ctx.branchSpec, name, taskBranch(ctx.task))
+    const mode = resolveBranchMode({
+        local: await repo.branchExists(branch),
+        remote: await repo.remoteBranchExists(branch)
+    })
     // pre-open GATES the worktree: a non-zero exit skips this repo (no worktree
     // is created), the run continues, and the command exits non-zero at the end.
     // The worktree does not exist yet, so the hook runs in the repo's source
@@ -177,7 +202,7 @@ const openCloned = async (
             name,
             path: dest,
             url: ctx.urlByName.get(name) ?? "",
-            branch: ctx.branch
+            branch
         },
         noHooks: ctx.noHooks
     })
@@ -197,13 +222,41 @@ const openCloned = async (
             }
         }
     }
-    terminal.log(
-        `Opening ${name} → ${relative} (${ctx.branch} from ${ctx.base})`
-    )
     // Fail-fast: a creation error propagates, stopping before any later repo is
-    // touched; already-created worktrees stay put.
-    const repo = git(source)
-    await repo.worktree(dest).create({ branch: ctx.branch, from: ctx.base })
+    // touched; already-created worktrees stay put. CREATE cuts a fresh branch
+    // off the base; ADOPT attaches the worktree to the existing branch (with
+    // tracking set up when it lives only on origin).
+    if (mode.mode === "adopt") {
+        terminal.log(
+            `Opening ${name} → ${relative} (adopting ${branch}${
+                mode.track ? " from origin" : ""
+            })`
+        )
+        await repo
+            .worktree(dest)
+            .create({ branch, attach: true, track: mode.track })
+    } else {
+        terminal.log(
+            `Opening ${name} → ${relative} (${branch} from ${ctx.base})`
+        )
+        await repo.worktree(dest).create({ branch, from: ctx.base })
+    }
+    // Record what landed for the note's `branches:` map. A created branch
+    // carries no base (consumers fall back to remoteDefault); an adopted branch
+    // discovers its base from the head's open PR (gh) when there is one — that
+    // base is what sync/diff/ship will rebase/compare/target against, the
+    // escape from flattening a stacked branch onto remoteDefault. A hand-fed
+    // --branch base is NOT inferred here; discovery is PR-only.
+    const recorded: UbertaskBranch = {
+        name: branch,
+        adopted: mode.mode === "adopt"
+    }
+    if (mode.mode === "adopt") {
+        const base = await discoverBase(dest, branch)
+        if (base !== undefined) {
+            recorded.base = base
+        }
+    }
     let carry: CarryEntry | undefined
     // Carry the configured untracked local files (.env and friends) from the
     // source clone into the fresh worktree BEFORE post-open fires, so a hook
@@ -218,7 +271,8 @@ const openCloned = async (
         carry = { repo: name, ...carried }
     }
     // post-open fires for the NEWLY-created worktree only, with cwd = the
-    // worktree and branch = task/<task>. A hook failure is recorded and the run
+    // worktree and branch = the resolved branch (task/<task> by default, or the
+    // adopted/--branch name). A hook failure is recorded and the run
     // continues — the worktree already exists.
     const result = await runHook("post-open", {
         config: ctx.config,
@@ -228,7 +282,7 @@ const openCloned = async (
             name,
             path: dest,
             url: ctx.urlByName.get(name) ?? "",
-            branch: ctx.branch
+            branch
         },
         noHooks: ctx.noHooks
     })
@@ -240,6 +294,30 @@ const openCloned = async (
         clone,
         hooks,
         carry,
-        opened: true
+        opened: true,
+        branch: recorded
     }
+}
+
+// The base ref for a freshly-adopted branch, discovered from its open PR's
+// target (`baseRefName`), or undefined when there is no PR / no gh. Mirrors
+// context's opportunistic gh use: an up-front availability probe, then prView
+// in the worktree (gh infers the repo from origin), with any gh failure
+// reading as "no PR known" → undefined → the consumers fall back to
+// remoteDefault. PR-only on purpose (the accepted residual): a stacked branch
+// with no PR yet records no base and can flatten on sync — the --branch base
+// override is the escape hatch.
+const discoverBase = async (
+    worktree: string,
+    branch: string
+): Promise<string | undefined> => {
+    const run = currentGh()
+    if (!(await ghAvailable(run))) {
+        return undefined
+    }
+    const view = await prView(run, worktree, branch)
+    if (!view || view.baseRefName === "") {
+        return undefined
+    }
+    return view.baseRefName
 }

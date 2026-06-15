@@ -72,6 +72,17 @@ Creates the `tasks/<task>/<name>/` worktree and the `task/<task>` branch in ever
 cloned repo, off each clone's current HEAD.
 
 - `--from <ref>` — base the branches off `<ref>` instead of current HEAD.
+- `--branch <repo>=<name>` (repeatable; a bare `--branch <name>` applies to every
+  repo in scope) names the branch instead of `task/<task>`. If that branch already
+  exists (local **or** `origin/<name>`) uberepo **adopts** it — the worktree attaches
+  to the existing branch (an origin-only branch becomes a local tracking branch)
+  rather than creating one; otherwise it's created normally. Adopted branches are
+  recorded in the note's [`branches:`](#schema) map, and `close`/`prune` **keep**
+  them (they remove the worktree but never delete an adopted branch — it's a real
+  branch, usually with an open PR). uberepo also reads an adopted branch's **base**
+  from its PR (`gh pr view`), so `sync`/`diff`/`ship` use that base (e.g. for a
+  stacked branch) instead of the repo default. Unset → `task/<task>`. Mixing the two
+  forms, or naming a repo outside the task's scope, is an error.
 - `--goal "<text>"` — set the task note's `goal` (creates/updates `ubertask.yml`).
 - `--repos <name>...` — **ADDITIVE scope; it only ever grows, never narrows.**
   On a brand-new task it sets the initial scope (only the named repos get
@@ -183,6 +194,11 @@ task on `close`.
     repos:
       - api
       - web
+    branches:
+      api:
+        name: fix/sso-loop
+        adopted: true
+        base: develop
     tickets:
       - https://acme.atlassian.net/browse/PROJ-1234
     decisions:
@@ -201,6 +217,12 @@ task on `close`.
   worktree outside the scope. Empty (`repos: []`) = unscoped (every cloned repo)
   and stays empty — an unscoped task can't be narrowed by `--repos`. This is the
   task's scope — distinct from a decision/blocker item's `repo:`.
+- `branches` — per-repo branch overrides, keyed by `source/<name>`: each entry is
+  `{ name, adopted, base? }`. `open --branch` writes one only for a repo whose branch
+  deviates from `task/<task>` (a plain task branch records nothing and resolves by
+  default). `adopted: true` marks a pre-existing branch uberepo attached to rather
+  than created — `close`/`prune` keep it; `base` is its rebase/PR target, auto-filled
+  from the branch's PR for adopted branches, else the repo default.
 - `tickets` — list of URLs (issue, PR, doc, thread).
 - `decisions` / `blockers` — lists of `{ note: |, repo? }`. `note` is a `|` literal
   block (free text — colons, `#`, slashes need no quoting). `repo:` is optional —
@@ -273,7 +295,7 @@ with no `hooks` key behaves exactly as before — hooks are entirely opt-in.
 | `UBEREPO_REPO_PATH` | absolute path of the dir the event is about (usually the cwd; see table) |
 | `UBEREPO_REPO_URL` | the repo's registered clone URL |
 | `UBEREPO_TASK` | the task name (empty for the clone events) |
-| `UBEREPO_BRANCH` | `task/<task>` (empty for the clone events) |
+| `UBEREPO_BRANCH` | the repo's task branch — `task/<task>` by default, or the adopted / `--branch` name when one was set (empty for the clone events) |
 | `UBEREPO_PR_URL` | the PR's URL in `post-ship` once created/found; empty otherwise (incl. `--no-pr`) |
 
 - **cwd gotcha:** a hook runs with its cwd set to the dir in the table, not the

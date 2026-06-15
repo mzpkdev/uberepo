@@ -7,7 +7,7 @@ import {
     taskFootprint
 } from "@/footprint"
 import { currentGh, ghAvailable, prView } from "@/forge"
-import { age, readNote, type TaskNote, taskBranch, worktreePath } from "@/tasks"
+import { age, readNote, type TaskNote, worktreePath } from "@/tasks"
 import type { UbertaskItem } from "@/ubertask"
 
 // `uberepo context <task>` — the handoff blob: everything a fresh session
@@ -41,10 +41,11 @@ export default defineCommand({
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
-        const branch = taskBranch(argv.task)
 
         // The durable note, exactly as status/open emit it (parsed fields +
-        // mtime), omitted from the JSON when the task has none.
+        // mtime), omitted from the JSON when the task has none. Its `branches:`
+        // map also names the branch (adopt-or-create) gh's PR lookup keys on
+        // per repo, below.
         const note = await readNote(root, argv.task)
 
         // The shared per-repo computation (footprint.ts, also behind diff).
@@ -84,7 +85,9 @@ export default defineCommand({
                 continue
             }
             const dest = worktreePath(root, argv.task, repo.name)
-            const view = await prView(run, dest, branch)
+            // Key the PR lookup on this repo's branch (adopted/--branch, else
+            // task/<task>) — the footprint entry already carries it.
+            const view = await prView(run, dest, repo.branch)
             repos.push(
                 view
                     ? {

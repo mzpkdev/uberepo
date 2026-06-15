@@ -142,6 +142,28 @@ export class Repository {
         }
     }
 
+    // True when a remote-tracking branch `<remote>/<branch>` exists (default
+    // remote origin). Mirrors branchExists but against refs/remotes/, so open's
+    // adopt path can tell "branch exists only on origin" (attach + track) from
+    // "no such branch anywhere" (create fresh). A missing ref is a silent
+    // false, exactly like branchExists.
+    async remoteBranchExists(
+        branch: string,
+        remote = "origin"
+    ): Promise<boolean> {
+        try {
+            await this.raw(
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                `refs/remotes/${remote}/${branch}`
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // True when `branch` is an ancestor of `into` (i.e. fully merged into it).
     // `git merge-base --is-ancestor` signals the answer purely through its exit
     // code — 0 for yes, 1 for no — so 1 must be read as a clean `false` rather
@@ -235,11 +257,47 @@ export class Worktree {
         readonly path: string
     ) {}
 
-    async create(opts: { branch: string; from: string }): Promise<this> {
-        await run(
-            ["worktree", "add", "-b", opts.branch, this.path, opts.from],
-            this.repo.path
-        )
+    // Add this worktree, in one of two modes:
+    //   - CREATE (default, or attach:false): cut a NEW branch `opts.branch` off
+    //     `opts.from` — the original `worktree add -b <branch> <path> <from>`.
+    //     `from` is required here (the base the fresh branch starts at).
+    //   - ATTACH (attach:true): check out a branch that ALREADY exists rather
+    //     than creating one — `worktree add <path> <branch>`. When the branch
+    //     lives only on the remote (`track:true`), the `--track -b` form creates
+    //     the local branch FROM `origin/<branch>` and sets it as upstream, so a
+    //     plain `git push`/`sync` knows where the branch belongs. `from` is
+    //     ignored in attach mode (the branch's own tip is the checkout point).
+    // open decides which mode per repo (adopt vs create); this only executes it.
+    async create(opts: {
+        branch: string
+        from?: string
+        attach?: boolean
+        track?: boolean
+    }): Promise<this> {
+        let args: string[]
+        if (opts.attach) {
+            args = opts.track
+                ? [
+                      "worktree",
+                      "add",
+                      "--track",
+                      "-b",
+                      opts.branch,
+                      this.path,
+                      `origin/${opts.branch}`
+                  ]
+                : ["worktree", "add", this.path, opts.branch]
+        } else {
+            args = [
+                "worktree",
+                "add",
+                "-b",
+                opts.branch,
+                this.path,
+                opts.from ?? "HEAD"
+            ]
+        }
+        await run(args, this.repo.path)
         return this
     }
 

@@ -299,6 +299,7 @@ describe("context command", () => {
             note: {
                 goal: "Kill the redirect loop",
                 repos: [],
+                branches: {},
                 tickets: ["https://acme.test/PROJ-1"],
                 decisions: [{ note: "keep /v1 alive", repo: "api" }],
                 blockers: [{ note: "api on :8080 first" }],
@@ -334,7 +335,7 @@ describe("context command", () => {
                 "view",
                 "task/alpha",
                 "--json",
-                "number,url,isDraft,state"
+                "number,url,isDraft,state,baseRefName"
             ],
             cwd: path.join(root, "tasks", "alpha", "api")
         })

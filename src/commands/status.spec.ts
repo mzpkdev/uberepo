@@ -429,6 +429,11 @@ describe("status command", () => {
         // The note carries its parsed fields (goal + the always-present empty
         // lists) alongside mtime — the stable shape downstream JSON consumers
         // read. Default writeNote content is `goal: | / do the thing`.
+        // mtime is asserted separately with rounding: some filesystems (APFS)
+        // store utimes at sub-ms precision that reads back as X.999, so an
+        // exact equality against the integer set time is flaky.
+        const [task] = parsed
+        expect(Math.round(task.note?.mtime ?? 0)).toBe(mtime.getTime())
         expect(parsed).toEqual([
             {
                 name: "alpha",
@@ -436,10 +441,11 @@ describe("status command", () => {
                 note: {
                     goal: "do the thing",
                     repos: [],
+                    branches: {},
                     tickets: [],
                     decisions: [],
                     blockers: [],
-                    mtime: mtime.getTime()
+                    mtime: expect.any(Number)
                 }
             }
         ])

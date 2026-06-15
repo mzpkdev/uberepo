@@ -305,6 +305,77 @@ describe("git integration", () => {
         })
     })
 
+    describe("worktree.create — attach mode (adoption)", () => {
+        it("attaches to an EXISTING local branch without creating one (no -b)", async () => {
+            const repo = await cloneOrigin()
+            // A pre-existing local branch with its own commit — the adopt case.
+            await sh(repo.path, "branch", "feature/login", "main")
+            const wtPath = path.join(tmp, "wt-adopt-local")
+
+            const handle = await repo
+                .worktree(wtPath)
+                .create({ branch: "feature/login", attach: true })
+
+            expect(handle.path).toBe(wtPath)
+            expect(fs.existsSync(wtPath)).toBe(true)
+            // The worktree is checked out ON that branch, and no NEW branch was
+            // cut — the branch count is unchanged from the one we made.
+            const head = await sh(wtPath, "rev-parse", "--abbrev-ref", "HEAD")
+            expect(head).toBe("feature/login")
+            expect(await repo.branchExists("feature/login")).toBe(true)
+        })
+
+        it("creates a tracking local branch from origin/<name> when origin-only", async () => {
+            // Push a branch to origin, then DELETE the local ref so it lives
+            // only on the remote — exactly open's origin-only adopt path.
+            const repo = await cloneOrigin()
+            await sh(repo.path, "switch", "-c", "feature/remote", "main")
+            await sh(repo.path, "push", "-u", "origin", "feature/remote")
+            await sh(repo.path, "switch", "main")
+            await sh(repo.path, "branch", "-D", "feature/remote")
+            expect(await repo.branchExists("feature/remote")).toBe(false)
+            expect(await repo.remoteBranchExists("feature/remote")).toBe(true)
+
+            const wtPath = path.join(tmp, "wt-adopt-remote")
+            await repo
+                .worktree(wtPath)
+                .create({ branch: "feature/remote", attach: true, track: true })
+
+            // The local branch now exists, is checked out, and tracks origin.
+            expect(fs.existsSync(wtPath)).toBe(true)
+            expect(await sh(wtPath, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
+                "feature/remote"
+            )
+            const upstream = await sh(
+                wtPath,
+                "rev-parse",
+                "--abbrev-ref",
+                "feature/remote@{upstream}"
+            )
+            expect(upstream).toBe("origin/feature/remote")
+        })
+
+        it("create (no attach) still cuts a fresh branch with -b, as before", async () => {
+            const repo = await cloneOrigin()
+            const wtPath = path.join(tmp, "wt-create-default")
+            await repo
+                .worktree(wtPath)
+                .create({ branch: "task/new", from: "HEAD" })
+            expect(await repo.branchExists("task/new")).toBe(true)
+        })
+    })
+
+    describe("remoteBranchExists", () => {
+        it("is true only for a branch present on the remote", async () => {
+            const repo = await cloneOrigin()
+            await sh(repo.path, "switch", "-c", "shipped", "main")
+            await sh(repo.path, "push", "-u", "origin", "shipped")
+            await sh(repo.path, "switch", "main")
+            expect(await repo.remoteBranchExists("shipped")).toBe(true)
+            expect(await repo.remoteBranchExists("never-pushed")).toBe(false)
+        })
+    })
+
     describe("worktrees()", () => {
         it("lists every worktree, including the freshly created one", async () => {
             const repo = await cloneOrigin()

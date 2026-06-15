@@ -4,6 +4,8 @@ goal: |
 
 repos: []
 
+branches: {}
+
 tickets: []
 
 decisions: []

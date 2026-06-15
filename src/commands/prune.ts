@@ -4,16 +4,27 @@ import { Config, repositoryUrl } from "@/config"
 import git, { type Repository } from "@/git"
 import { force } from "@/options/force"
 import {
+    baseFor,
+    branchFor,
     openTasks,
     partitionScope,
     type Task,
-    taskBranch,
     worktreePath
 } from "@/tasks"
 import { normalizeRepository } from "@/url"
 
-// A task's repos paired with their source repository and on-disk worktree.
-type Target = { name: string; repo: Repository; dest: string }
+// A task's repos paired with their source repository, on-disk worktree, the
+// branch the worktree is on (adopted/--branch, else task/<task>), whether that
+// branch was ADOPTED (then never deleted), and the persisted per-repo base
+// (undefined → fall back to remoteDefault in the merged-check).
+type Target = {
+    name: string
+    repo: Repository
+    dest: string
+    branch: string
+    adopted: boolean
+    base?: string
+}
 
 // One task's prune outcome. `pruned` = removed (or, in preview mode where
 // `forced` is false, would be removed — its branches are merged and its
@@ -40,6 +51,7 @@ const targetsOf = async (task: Task): Promise<Target[]> => {
         const { name } = normalizeRepository(repositoryUrl(entry))
         byName.set(name, path.join(root, "source", name))
     }
+    const branches = task.note?.branches
     const { inScope } = partitionScope(
         task.repos.map((repo) => repo.name),
         task.note?.repos ?? []
@@ -51,7 +63,10 @@ const targetsOf = async (task: Task): Promise<Target[]> => {
             targets.push({
                 name,
                 repo: git(source),
-                dest: worktreePath(root, task.name, name)
+                dest: worktreePath(root, task.name, name),
+                branch: branchFor(task.name, name, branches),
+                adopted: branches?.[name]?.adopted ?? false,
+                base: baseFor(name, branches)
             })
         }
     }
@@ -67,18 +82,27 @@ const splitScope = (task: Task): { inScope: string[]; strays: string[] } =>
         task.note?.repos ?? []
     )
 
-// Whether a single repo's task branch is "done": merged into the repo's own
-// remote default branch. Fetches first so "merged" reflects the latest origin
-// default; a fetch failure (offline/no remote) is tolerated and we fall back
-// to the last-known remote refs.
-const repoDone = async (repo: Repository, branch: string): Promise<boolean> => {
+// Whether a single repo's task branch is "done" for pruning. An ADOPTED branch
+// is always done: prune never deletes it (it predates the task), so its merge
+// state must not pin the task open. Otherwise "done" = the created branch is
+// merged into its base — the persisted per-repo base when one was recorded,
+// else the repo's remote default. Fetches first so "merged" reflects the
+// latest origin default; a fetch failure (offline/no remote) is tolerated and
+// we classify against the last-known remote refs.
+const repoDone = async (target: Target): Promise<boolean> => {
+    if (target.adopted) {
+        return true
+    }
     try {
-        await repo.fetch()
+        await target.repo.fetch()
     } catch {
         // Offline or no remote: classify against the last fetched refs.
     }
-    const onto = await repo.remoteDefault()
-    return Boolean(onto) && (await repo.isMerged(branch, onto as string))
+    const onto = target.base ?? (await target.repo.remoteDefault())
+    return (
+        Boolean(onto) &&
+        (await target.repo.isMerged(target.branch, onto as string))
+    )
 }
 
 export default defineCommand({
@@ -123,11 +147,10 @@ export default defineCommand({
                 kept.push({ task: task.name, status: "kept", reason: "dirty" })
                 continue
             }
-            const branch = taskBranch(task.name)
             const targets = await targetsOf(task)
             let done = targets.length > 0
             for (const target of targets) {
-                if (!(await repoDone(target.repo, branch))) {
+                if (!(await repoDone(target))) {
                     done = false
                     break
                 }
@@ -188,13 +211,16 @@ export default defineCommand({
         let failed = 0
         const applied: PruneTask[] = []
         for (const { task, targets } of prunable) {
-            const branch = taskBranch(task.name)
             try {
-                for (const { repo, dest } of targets) {
+                for (const { repo, dest, branch, adopted } of targets) {
                     // The worktree must go before its branch: git refuses to
-                    // delete a branch that is still checked out.
+                    // delete a branch that is still checked out. An ADOPTED
+                    // branch is never deleted — remove only its worktree (the
+                    // data-loss guard, same as close).
                     await repo.worktree(dest).remove()
-                    await repo.deleteBranch(branch)
+                    if (!adopted) {
+                        await repo.deleteBranch(branch)
+                    }
                 }
                 pruned += 1
                 applied.push({ task: task.name, status: "pruned" })

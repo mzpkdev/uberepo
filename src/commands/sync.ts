@@ -9,7 +9,14 @@ import { type HookResult, runHook } from "@/hooks"
 import { check } from "@/options/check"
 import { from } from "@/options/from"
 import { noHooks } from "@/options/no-hooks"
-import { partitionScope, taskBranch, taskScope, worktreePath } from "@/tasks"
+import {
+    baseFor,
+    branchFor,
+    partitionScope,
+    readNote,
+    type TaskNote,
+    worktreePath
+} from "@/tasks"
 import { normalizeRepository } from "@/url"
 
 // One repo's sync outcome. `rebased` = task branch replayed onto the upstream,
@@ -50,13 +57,16 @@ export default defineCommand({
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
-        const branch = taskBranch(argv.task)
+        // The note carries the task's scope AND its per-repo branches (adopt-
+        // or-create + persisted base). Read once; a legacy note resolves every
+        // repo to task/<task> with no base, exactly as before.
+        const note = await readNote(root, argv.task)
 
         // --check forks off before any sync machinery: it shares the scope
         // resolution and target semantics but mutates nothing (beyond a fetch)
         // and fires no hooks — a forecast is not the lifecycle op.
         if (argv.check) {
-            await forecast(root, config, argv.task, branch, argv.from)
+            await forecast(root, config, argv.task, note, argv.from)
             return
         }
 
@@ -85,7 +95,7 @@ export default defineCommand({
         // worktree outside a non-empty scope is drift — warn about it (never
         // touch it silently, never silently skip the in-scope work) and proceed
         // on the in-scope intersection. Unscoped → every worktree-bearing repo.
-        const scope = await taskScope(root, argv.task)
+        const scope = note?.repos ?? []
         const { inScope, strays } = partitionScope(
             present.map((t) => t.name),
             scope
@@ -197,15 +207,22 @@ export default defineCommand({
             const { name, url, source, dest } = target
             const repo = git(source)
             const wt = repo.worktree(dest)
+            // This repo's branch to rebase (adopted/--branch, else task/<task>).
+            const branch = branchFor(argv.task, name, note?.branches)
 
             // Resolve the rebase target before fetching. An explicit --from ref
-            // wins; otherwise we resolve the remote default branch *name* (e.g.
-            // origin/main) from the local origin/HEAD symref. Resolving first
-            // means a missing/unconfigured origin yields a clean error instead
-            // of a raw fetch failure, and never rebases onto a guessed target.
-            // The name is stable across the fetch; fetch then advances what it
-            // points at, so the rebase still lands on the freshest upstream.
-            const resolved = argv.from ?? (await repo.remoteDefault())
+            // wins; then the persisted per-repo base (an adopted branch's PR
+            // base); otherwise we resolve the remote default branch *name*
+            // (e.g. origin/main) from the local origin/HEAD symref. Resolving
+            // first means a missing/unconfigured origin yields a clean error
+            // instead of a raw fetch failure, and never rebases onto a guessed
+            // target. The name is stable across the fetch; fetch then advances
+            // what it points at, so the rebase still lands on the freshest
+            // upstream.
+            const resolved =
+                argv.from ??
+                baseFor(name, note?.branches) ??
+                (await repo.remoteDefault())
             if (!resolved) {
                 repos.push({
                     name,
@@ -333,7 +350,7 @@ const forecast = async (
     root: string,
     config: UberepoConfig,
     task: string,
-    branch: string,
+    note: TaskNote | undefined,
     from: string | undefined
 ): Promise<void> => {
     // merge-tree --write-tree landed in git 2.38 — gate up front with an
@@ -360,7 +377,7 @@ const forecast = async (
     // act on the in-scope intersection), but report like diff: a scoped repo
     // with no worktree is a `skipped` line, not a silent omission — the
     // pre-flight should say "nothing to sync here", not hide the repo.
-    const scope = await taskScope(root, task)
+    const scope = note?.repos ?? []
     const { inScope, strays } = partitionScope(present, scope)
     for (const name of strays) {
         terminal.warn(
@@ -390,10 +407,16 @@ const forecast = async (
             continue
         }
         const repo = git(source)
+        // This repo's branch to forecast (adopted/--branch, else task/<task>).
+        const branch = branchFor(task, name, note?.branches)
 
-        // Resolve before fetching, the same order as sync: a missing or
+        // Resolve before fetching, the same order as sync: --from, then the
+        // persisted per-repo base, then the remote default. A missing or
         // unconfigured origin reads as a clean skip, never a raw fetch error.
-        const resolved = from ?? (await repo.remoteDefault())
+        const resolved =
+            from ??
+            baseFor(name, note?.branches) ??
+            (await repo.remoteDefault())
         if (!resolved) {
             repos.push({
                 name,

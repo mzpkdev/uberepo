@@ -22,6 +22,19 @@ export type UbertaskItem = {
     repo?: string
 }
 
+// One repo's recorded branch in a task: the branch its worktree lives on
+// (`name`), whether `open` ADOPTED a pre-existing branch (`adopted`) rather
+// than creating `task/<task>`, and — for an adopted branch whose PR base was
+// discovered — the persisted `base` ref the consumers rebase/diff/ship
+// against (omitted when none was discovered, so callers fall back to
+// remoteDefault). A created branch is `{ name, adopted: false }`, no base.
+// Keyed by the flat source/<name> repo name in the `branches:` map.
+export type UbertaskBranch = {
+    name: string
+    adopted: boolean
+    base?: string
+}
+
 // The parsed note. Every field is always present so callers never branch on
 // undefined: `goal` is "" when unset, the lists are [] when empty. `goal` is a
 // single logical line (the documented one-line `|` block); the lists preserve
@@ -35,6 +48,10 @@ export type Ubertask = {
     tickets: string[]
     decisions: UbertaskItem[]
     blockers: UbertaskItem[]
+    // The per-repo recorded branches (adopt-or-create), keyed by flat repo
+    // name. {} when the task records none — a legacy note (no `branches:`) or
+    // a freshly-seeded one — so callers fall back to taskBranch()/remoteDefault.
+    branches: Record<string, UbertaskBranch>
 }
 
 // An empty note — the shape a freshly-seeded template parses to, and the base
@@ -44,7 +61,8 @@ const empty = (): Ubertask => ({
     repos: [],
     tickets: [],
     decisions: [],
-    blockers: []
+    blockers: [],
+    branches: {}
 })
 
 // Strip a trailing inline comment from a single-line scalar. Only used for the
@@ -153,6 +171,83 @@ const readStringList = (
     return { values, next: i }
 }
 
+// Parse the `branches:` map: a sequence of `  <repo>:` blocks, each with
+// `name:`, `adopted:` and an optional `base:` line indented beneath it.
+// Starts at the first line after the `branches:` key; returns the map and the
+// index to resume from. Tolerant like the rest: a repo block missing `name`
+// is dropped (a branch with no name is meaningless), `adopted` defaults to
+// false, and anything that isn't a recognised `<repo>:` header at the map's
+// indent ends the map.
+const readBranches = (
+    lines: string[],
+    start: number
+): { branches: Record<string, UbertaskBranch>; next: number } => {
+    const branches: Record<string, UbertaskBranch> = {}
+    let i = start
+    // The map's repo headers sit one level in; lock onto the first one's
+    // indent so deeper field lines (name/adopted/base) are never mistaken for
+    // a repo header.
+    let mapIndent = -1
+    while (i < lines.length) {
+        const line = lines[i]
+        if (line.trim() === "") {
+            i++
+            continue
+        }
+        const indent = line.length - line.trimStart().length
+        const header = /^(\s*)([A-Za-z0-9._-]+):\s*$/.exec(line)
+        // A top-level (column-0) line, or a non-header line, ends the map.
+        if (indent === 0 || !header) {
+            break
+        }
+        if (mapIndent === -1) {
+            mapIndent = indent
+        }
+        if (indent !== mapIndent) {
+            break
+        }
+        const repo = header[2]
+        i++
+        let name: string | undefined
+        let adopted = false
+        let base: string | undefined
+        // Consume the field lines indented past the repo header.
+        while (i < lines.length) {
+            const field = lines[i]
+            if (field.trim() === "") {
+                i++
+                continue
+            }
+            const fieldIndent = field.length - field.trimStart().length
+            if (fieldIndent <= mapIndent) {
+                break
+            }
+            const kv = /^\s*([a-z]+):\s*(.*)$/.exec(field)
+            if (!kv) {
+                i++
+                continue
+            }
+            const value = stripComment(kv[2])
+            if (kv[1] === "name") {
+                name = value
+            } else if (kv[1] === "adopted") {
+                adopted = value === "true"
+            } else if (kv[1] === "base" && value !== "") {
+                base = value
+            }
+            i++
+        }
+        if (name !== undefined && name !== "") {
+            branches[repo] = {
+                name,
+                adopted,
+                ...(base !== undefined ? { base } : {})
+            }
+        }
+    }
+    return { branches, next: i }
+}
+
 // Parse ubertask.yml text into a typed note. Tolerant by design: unknown
 // top-level keys are skipped, recognised keys win, and absent keys keep their
 // empty defaults — a partial or hand-edited note parses to its best
@@ -203,6 +298,14 @@ export const parse = (raw: string): Ubertask => {
                 note[name] = parsed.items
                 i = parsed.next
             }
+        } else if (name === "branches") {
+            if (value === "{}" || value === "[]") {
+                i++
+            } else {
+                const parsed = readBranches(lines, i + 1)
+                note.branches = parsed.branches
+                i = parsed.next
+            }
         } else {
             i++
         }
@@ -231,6 +334,33 @@ const serializeStringList = (key: string, values: string[]): string => {
     return [`${key}:`, ...values.map((value) => `  - ${value}`)].join("\n")
 }
 
+// Serialize the `branches:` map: one `  <repo>:` block per recorded repo (in
+// the key's natural insertion order, which open preserves in registration
+// order), each with `name:`, `adopted:` and — only when present — `base:`.
+// Empty map → `branches: {}` (the flow form parse treats as no branches),
+// mirroring how the lists collapse to `[]`. Round-trips with readBranches.
+const serializeBranches = (
+    branches: Record<string, UbertaskBranch>
+): string => {
+    const names = Object.keys(branches)
+    if (names.length === 0) {
+        return "branches: {}"
+    }
+    const blocks = names.map((repo) => {
+        const branch = branches[repo]
+        const lines = [
+            `  ${repo}:`,
+            `    name: ${branch.name}`,
+            `    adopted: ${branch.adopted}`
+        ]
+        if (branch.base !== undefined && branch.base !== "") {
+            lines.push(`    base: ${branch.base}`)
+        }
+        return lines.join("\n")
+    })
+    return [`branches:`, ...blocks].join("\n")
+}
+
 // Serialize a `decisions`/`blockers` list. Each item is a `- note: |` block
 // scalar (free text needs no quoting) plus an optional `repo:` line, exactly as
 // the schema documents. Empty list → `key: []`.
@@ -257,6 +387,7 @@ export const serialize = (note: Ubertask): string => {
     const sections = [
         `${HEADER}\ngoal: |${goalBody}`,
         serializeStringList("repos", note.repos),
+        serializeBranches(note.branches),
         serializeStringList("tickets", note.tickets),
         serializeItems("decisions", note.decisions),
         serializeItems("blockers", note.blockers)

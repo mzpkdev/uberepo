@@ -18,6 +18,8 @@ const SEED =
     "\n" +
     "repos: []\n" +
     "\n" +
+    "branches: {}\n" +
+    "\n" +
     "tickets: []\n" +
     "\n" +
     "decisions: []\n" +
@@ -34,6 +36,15 @@ const RICH =
     "repos:\n" +
     "  - api\n" +
     "  - web\n" +
+    "\n" +
+    "branches:\n" +
+    "  api:\n" +
+    "    name: feat/sso\n" +
+    "    adopted: true\n" +
+    "    base: develop\n" +
+    "  web:\n" +
+    "    name: task/sso\n" +
+    "    adopted: false\n" +
     "\n" +
     "tickets:\n" +
     "  - https://acme.atlassian.net/browse/PROJ-1234\n" +
@@ -53,6 +64,7 @@ describe("parse", () => {
         expect(parse(SEED)).toEqual<Ubertask>({
             goal: "<one line: what done looks like & why>",
             repos: [],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: []
@@ -63,6 +75,10 @@ describe("parse", () => {
         expect(parse(RICH)).toEqual<Ubertask>({
             goal: "Kill the SSO redirect loop — users bounce /login ↔ /callback",
             repos: ["api", "web"],
+            branches: {
+                api: { name: "feat/sso", adopted: true, base: "develop" },
+                web: { name: "task/sso", adopted: false }
+            },
             tickets: ["https://acme.atlassian.net/browse/PROJ-1234"],
             decisions: [
                 { note: "keep /v1 alive — mobile still rides it", repo: "api" }
@@ -125,6 +141,7 @@ describe("parse", () => {
         expect(parse("goal: |\n  just a goal\n")).toEqual<Ubertask>({
             goal: "just a goal",
             repos: [],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: []
@@ -135,6 +152,7 @@ describe("parse", () => {
         expect(parse("")).toEqual<Ubertask>({
             goal: "",
             repos: [],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: []
@@ -167,6 +185,7 @@ describe("serialize", () => {
         const note: Ubertask = {
             goal: "ship it",
             repos: [],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: []
@@ -177,6 +196,8 @@ describe("serialize", () => {
                 "  ship it\n" +
                 "\n" +
                 "repos: []\n" +
+                "\n" +
+                "branches: {}\n" +
                 "\n" +
                 "tickets: []\n" +
                 "\n" +
@@ -192,6 +213,7 @@ describe("serialize", () => {
         const scoped: Ubertask = {
             goal: "g",
             repos: ["api", "web"],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: []
@@ -207,6 +229,7 @@ describe("serialize", () => {
         const note: Ubertask = {
             goal: "",
             repos: [],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: []
@@ -218,6 +241,10 @@ describe("serialize", () => {
         const note: Ubertask = {
             goal: "do a thing with: colons # and hashes",
             repos: ["api", "web"],
+            branches: {
+                api: { name: "feat/x", adopted: true, base: "develop" },
+                web: { name: "task/x", adopted: false }
+            },
             tickets: ["https://a", "https://b"],
             decisions: [
                 { note: "decided x", repo: "api" },
@@ -226,6 +253,61 @@ describe("serialize", () => {
             blockers: [{ note: "blocked on z" }]
         }
         expect(parse(serialize(note))).toEqual(note)
+    })
+})
+
+describe("branches map", () => {
+    it("parses an adopted entry (name + adopted + base) and a created entry (no base)", () => {
+        const note = parse(
+            "branches:\n" +
+                "  api:\n" +
+                "    name: feat/sso\n" +
+                "    adopted: true\n" +
+                "    base: develop\n" +
+                "  web:\n" +
+                "    name: task/sso\n" +
+                "    adopted: false\n"
+        )
+        expect(note.branches).toEqual({
+            api: { name: "feat/sso", adopted: true, base: "develop" },
+            web: { name: "task/sso", adopted: false }
+        })
+    })
+
+    it("treats `branches: {}` as no branches", () => {
+        expect(parse("branches: {}\n").branches).toEqual({})
+    })
+
+    it("is tolerant: a repo block with no name is dropped", () => {
+        const note = parse(
+            "branches:\n  api:\n    adopted: true\n  web:\n    name: task/x\n    adopted: false\n"
+        )
+        // api had no name → dropped; web survives.
+        expect(note.branches).toEqual({
+            web: { name: "task/x", adopted: false }
+        })
+    })
+
+    it("round-trips created and adopted entries byte-stably", () => {
+        const note: Ubertask = {
+            goal: "g",
+            repos: [],
+            branches: {
+                api: { name: "feat/x", adopted: true, base: "release/2" },
+                web: { name: "task/g", adopted: false }
+            },
+            tickets: [],
+            decisions: [],
+            blockers: []
+        }
+        expect(parse(serialize(note)).branches).toEqual(note.branches)
+        // The created entry serializes WITHOUT a base line.
+        expect(serialize(note)).toContain(
+            "  web:\n    name: task/g\n    adopted: false\n"
+        )
+        expect(serialize(note)).not.toContain(
+            "web:\n    name: task/g\n    adopted: false\n    base"
+        )
     })
 })
 
@@ -250,6 +332,7 @@ describe("read / write", () => {
         const note: Ubertask = {
             goal: "round trip",
             repos: ["api"],
+            branches: { api: { name: "task/round-trip", adopted: false } },
             tickets: ["https://t"],
             decisions: [{ note: "d", repo: "web" }],
             blockers: []

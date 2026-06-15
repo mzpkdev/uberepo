@@ -15,8 +15,35 @@ export const worktreePath = (
     name: string
 ): string => path.join(root, TASKS_DIR, task, name)
 
-// The branch convention a task's worktrees live on.
+// The branch convention a task's worktrees live on, by default. A repo can
+// override this (adopt a pre-existing branch) — see branchFor.
 export const taskBranch = (task: string): string => `task/${task}`
+
+// The branch one repo's worktree lives on for a task: the per-repo branch
+// recorded in the note's `branches:` map when present, else the `task/<task>`
+// default. This is THE resolver every command routes its branch-name
+// derivation through, so a repo that adopted a pre-existing branch (recorded
+// at open time) is operated on under that branch everywhere — push, rebase,
+// merged-check, diff — while a repo with no record keeps the original
+// convention unchanged. `branches` is the parsed note's map ({} for a legacy
+// or unscoped note), so a task that never adopted resolves exactly as today.
+export const branchFor = (
+    task: string,
+    repo: string,
+    branches?: Record<string, { name: string }>
+): string => branches?.[repo]?.name ?? taskBranch(task)
+
+// The persisted per-repo base for a task, or undefined when none is recorded.
+// Only an ADOPTED branch whose PR base was discovered carries a base; a created
+// branch records none. Threaded into the EXISTING `override ?? remoteDefault()`
+// chain at every base consumer as `argv.from ?? baseFor(...) ?? remoteDefault()`
+// — so a legacy task (no `branches:`) yields undefined and falls straight
+// through to remoteDefault, the original behaviour. NOT a resolver of its own:
+// it returns the stored value, the caller keeps its remoteDefault() tail.
+export const baseFor = (
+    repo: string,
+    branches?: Record<string, { base?: string }>
+): string | undefined => branches?.[repo]?.base
 
 // The per-task durable note: <root>/tasks/<task>/ubertask.yml — a sibling of the
 // per-repo worktree dirs (NOT inside any worktree, NOT one-per-repo). Holds the

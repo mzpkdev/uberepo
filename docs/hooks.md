@@ -63,7 +63,7 @@ A hook inherits the full parent environment plus these variables:
 | `UBEREPO_REPO` | the repo's flat name, as in `source/<name>` |
 | `UBEREPO_REPO_PATH` | absolute path of the directory the event is about (usually also the cwd; see the table) |
 | `UBEREPO_REPO_URL` | the repo's registered clone URL |
-| `UBEREPO_BRANCH` | `task/<task>` (empty string for the clone events) |
+| `UBEREPO_BRANCH` | the repo's task branch — `task/<task>` by default, or the adopted / `--branch` name when one was set (empty string for the clone events) |
 | `UBEREPO_WORKSPACE` | absolute path of the workspace root |
 | `UBEREPO_PR_URL` | the PR's URL in `post-ship` once one is created or found; empty everywhere else, including under `--no-pr` |
 

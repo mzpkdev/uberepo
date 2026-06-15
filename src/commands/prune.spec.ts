@@ -417,6 +417,69 @@ describe("prune command", () => {
         }
     })
 
+    describe("adopted branches", () => {
+        // Open a worktree on a pre-existing branch and record it ADOPTED.
+        const adoptWorktree = async (
+            name: string,
+            task: string,
+            branch: string
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            await sh(source, "branch", branch, "main")
+            const wt = path.join(root, "tasks", task, name)
+            await sh(source, "worktree", "add", wt, branch)
+            const dir = path.join(root, "tasks", task)
+            await fsp.mkdir(dir, { recursive: true })
+            await fsp.writeFile(
+                path.join(dir, "ubertask.yml"),
+                `goal: |\n  g\n\nbranches:\n  ${name}:\n    name: ${branch}\n    adopted: true\n`
+            )
+            return wt
+        }
+
+        const namedBranchExists = async (
+            name: string,
+            branch: string
+        ): Promise<boolean> => {
+            const source = path.join(root, "source", name)
+            try {
+                await sh(
+                    source,
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    `refs/heads/${branch}`
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        it("prunes the task (worktree removed) but NEVER deletes the adopted branch", async () => {
+            await makeSource("api")
+            await register(["api"])
+            // An adopted branch with its own UNMERGED commit: a created branch
+            // would keep the task ("unmerged"), but an adopted branch is always
+            // "done" for prune — yet the branch survives the removal.
+            const wt = await adoptWorktree("api", "alpha", "feature/login")
+            await fsp.writeFile(path.join(wt, "x.txt"), "work\n")
+            await sh(wt, "add", "x.txt")
+            await sh(wt, "commit", "-m", "adopted work")
+
+            const json = await captureJson<PruneJson>(async () => {
+                await prune.run({ force: true })
+            })
+
+            expect(json).toEqual({
+                forced: true,
+                tasks: [{ task: "alpha", status: "pruned" }]
+            })
+            expect(fs.existsSync(wt)).toBe(false)
+            expect(await namedBranchExists("api", "feature/login")).toBe(true)
+        })
+    })
+
     type PruneJson = {
         forced: boolean
         tasks: { task: string; status: string; reason?: string }[]

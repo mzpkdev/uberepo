@@ -2,7 +2,13 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { repositoryUrl, type UberepoConfig } from "@/config"
 import git from "@/git"
-import { partitionScope, taskBranch, taskScope, worktreePath } from "@/tasks"
+import {
+    baseFor,
+    branchFor,
+    partitionScope,
+    readNote,
+    worktreePath
+} from "@/tasks"
 import { normalizeRepository } from "@/url"
 
 // A task's per-repo footprint — the read-only computation diff and context
@@ -67,7 +73,11 @@ export const taskFootprint = async (
     root: string,
     task: string
 ): Promise<TaskFootprint> => {
-    const branch = taskBranch(task)
+    // The note carries the scope AND the per-repo branches (adopt-or-create +
+    // persisted base). Read once; a legacy note resolves every repo to
+    // task/<task> with no base, exactly as before.
+    const note = await readNote(root, task)
+    const branches = note?.branches
 
     // The repos that can actually be reported: registered AND cloned
     // (source/<name> exists) AND holding this task's worktree, in stable
@@ -83,7 +93,7 @@ export const taskFootprint = async (
     }
     present.sort()
 
-    const scope = await taskScope(root, task)
+    const scope = note?.repos ?? []
     const { inScope, strays } = partitionScope(present, scope)
     const missing = scope.filter((name) => !present.includes(name))
     const targets = [...new Set([...inScope, ...missing])].sort()
@@ -93,6 +103,8 @@ export const taskFootprint = async (
     for (const name of targets) {
         const source = path.join(root, "source", name)
         const dest = worktreePath(root, task, name)
+        // This repo's branch (adopted/--branch name, else task/<task>).
+        const branch = branchFor(task, name, branches)
         if (!present.includes(name)) {
             repos.push({
                 name,
@@ -104,10 +116,11 @@ export const taskFootprint = async (
         }
         const repo = git(source)
 
-        // The comparison base is the same ref sync rebases onto by default:
-        // origin's default branch, resolved from the local origin/HEAD symref
-        // (e.g. origin/main).
-        const resolved = await repo.remoteDefault()
+        // The comparison base: the persisted per-repo base (an adopted
+        // branch's PR base) when recorded, else the same ref sync rebases onto
+        // by default — origin's default branch, resolved from the local
+        // origin/HEAD symref (e.g. origin/main).
+        const resolved = baseFor(name, branches) ?? (await repo.remoteDefault())
         if (!resolved) {
             repos.push({
                 name,

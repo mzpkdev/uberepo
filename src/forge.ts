@@ -135,12 +135,16 @@ export const prCreate = async (
 }
 
 // One PR as gh reports it from `pr view <branch> --json number,url,isDraft,
-// state`. state is gh's enum: OPEN / CLOSED / MERGED.
+// state,baseRefName`. state is gh's enum: OPEN / CLOSED / MERGED;
+// baseRefName is the branch the PR targets (e.g. "main", or another task
+// branch for a stacked PR) — open reads it at adopt time to record the
+// adopted branch's persisted base.
 export type PullRequestView = {
     number: number
     url: string
     isDraft: boolean
     state: string
+    baseRefName: string
 }
 
 // The PR for `branch` in the repo gh infers from `cwd`, or undefined when the
@@ -156,7 +160,13 @@ export const prView = async (
 ): Promise<PullRequestView | undefined> => {
     try {
         const out = await run(
-            ["pr", "view", branch, "--json", "number,url,isDraft,state"],
+            [
+                "pr",
+                "view",
+                branch,
+                "--json",
+                "number,url,isDraft,state,baseRefName"
+            ],
             cwd
         )
         const trimmed = out.trim()

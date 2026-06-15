@@ -98,7 +98,8 @@ describe("forge: gh wrappers", () => {
                 number: 12,
                 url: "https://github.com/acme/api/pull/12",
                 isDraft: true,
-                state: "OPEN"
+                state: "OPEN",
+                baseRefName: "main"
             })
         ])
         const pr = await prView(run, "/wt/api", "task/alpha")
@@ -109,7 +110,7 @@ describe("forge: gh wrappers", () => {
                     "view",
                     "task/alpha",
                     "--json",
-                    "number,url,isDraft,state"
+                    "number,url,isDraft,state,baseRefName"
                 ],
                 cwd: "/wt/api"
             }
@@ -118,7 +119,8 @@ describe("forge: gh wrappers", () => {
             number: 12,
             url: "https://github.com/acme/api/pull/12",
             isDraft: true,
-            state: "OPEN"
+            state: "OPEN",
+            baseRefName: "main"
         })
     })
 

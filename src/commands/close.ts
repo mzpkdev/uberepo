@@ -8,7 +8,13 @@ import git from "@/git"
 import { type HookResult, runHook } from "@/hooks"
 import { force } from "@/options/force"
 import { noHooks } from "@/options/no-hooks"
-import { partitionScope, taskBranch, taskScope, worktreePath } from "@/tasks"
+import {
+    baseFor,
+    branchFor,
+    partitionScope,
+    readNote,
+    worktreePath
+} from "@/tasks"
 import { normalizeRepository } from "@/url"
 
 // One repo's close outcome: `closed` (worktree + branch removed) or `skipped`
@@ -40,7 +46,12 @@ export default defineCommand({
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
-        const branch = taskBranch(argv.task)
+        // The durable note carries the task's declared scope AND its per-repo
+        // recorded branches (adopt-or-create + persisted base). Read once: a
+        // legacy note (no `branches:`) resolves every repo to task/<task> with
+        // no base, exactly as before.
+        const note = await readNote(root, argv.task)
+        const branches = note?.branches
 
         let closed = 0
         let skipped = 0
@@ -69,7 +80,7 @@ export default defineCommand({
         // worktree outside a non-empty scope is drift — warn and leave it
         // standing rather than silently removing or ignoring it. Unscoped →
         // every worktree-bearing repo, the original behaviour.
-        const scope = await taskScope(root, argv.task)
+        const scope = note?.repos ?? []
         const { inScope, strays } = partitionScope(
             present.map((t) => t.name),
             scope
@@ -93,10 +104,18 @@ export default defineCommand({
         for (const { name, source, dest, url } of targets) {
             const repo = git(source)
             const wt = repo.worktree(dest)
+            // This repo's branch (adopted/--branch name, else task/<task>) and
+            // whether open ADOPTED it — an adopted branch is never deleted on
+            // close (it's not ours to drop; we only remove the worktree).
+            const branch = branchFor(argv.task, name, branches)
+            const adopted = branches?.[name]?.adopted ?? false
 
             // Without --force, pre-check safety so we never half-close a repo:
             // a dirty worktree or a branch with unmerged commits is skipped
-            // intact, with a reason. --force closes regardless.
+            // intact, with a reason. --force closes regardless. An ADOPTED
+            // branch is never deleted, so the merged-check is moot for it —
+            // skip the unmerged guard (the worktree-removal is always safe; a
+            // dirty worktree still blocks to protect uncommitted work).
             if (!argv.force) {
                 if (await wt.dirty()) {
                     repos.push({
@@ -108,10 +127,17 @@ export default defineCommand({
                     skipped += 1
                     continue
                 }
-                const into = await repo.remoteDefault()
+                // Base: the persisted per-repo base wins, else this repo's
+                // remote default — the same chain every consumer uses.
+                const into =
+                    baseFor(name, branches) ?? (await repo.remoteDefault())
                 // No remote default to compare against → assume unmerged and
-                // protect by default; --force overrides.
-                if (!into || !(await repo.isMerged(branch, into))) {
+                // protect by default; --force overrides. Adopted branches skip
+                // this entirely (never deleted).
+                if (
+                    !adopted &&
+                    (!into || !(await repo.isMerged(branch, into)))
+                ) {
                     repos.push({
                         name,
                         status: "skipped",
@@ -164,9 +190,18 @@ export default defineCommand({
                 )
             }
             // Safe (or --force): the worktree must go before the branch, since
-            // git refuses to delete a branch that is still checked out.
+            // git refuses to delete a branch that is still checked out. An
+            // ADOPTED branch is the data-loss line: remove its worktree but
+            // NEVER delete the branch — it predates the task and may carry a
+            // PR / other worktrees. A created task/<task> branch is deleted as
+            // before. --force does NOT override this (an adopted branch is
+            // never ours to drop, forced or not).
             await wt.remove({ force: argv.force })
-            await repo.deleteBranch(branch, { force: argv.force })
+            if (!adopted) {
+                await repo.deleteBranch(branch, { force: argv.force })
+            } else {
+                terminal.log(`${name}: kept adopted branch ${branch}`)
+            }
             repos.push({ name, status: "closed" })
             closed += 1
             terminal.log(`${name}: closed`)

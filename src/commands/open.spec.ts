@@ -8,6 +8,7 @@ import { terminal } from "cmdore"
 import { vi } from "vitest"
 import open from "@/commands/open"
 import { CONFIG_FILENAME } from "@/config"
+import { type Gh, resetGh, setGh } from "@/forge"
 import git, { Repository } from "@/git"
 import { UBERTASK_FILENAME } from "@/tasks"
 import { parse } from "@/ubertask"
@@ -96,6 +97,7 @@ describe("open command", () => {
     afterEach(async () => {
         terminal.jsonMode = false
         vi.restoreAllMocks()
+        resetGh()
         process.chdir(cwd)
         await fsp.rm(tmp, { recursive: true, force: true })
     })
@@ -221,6 +223,7 @@ describe("open command", () => {
         const logs = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -252,6 +255,7 @@ describe("open command", () => {
         await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: "base",
                 goal: undefined,
@@ -277,6 +281,7 @@ describe("open command", () => {
         await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -296,6 +301,7 @@ describe("open command", () => {
         const first = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -312,6 +318,7 @@ describe("open command", () => {
         const second = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -338,6 +345,7 @@ describe("open command", () => {
         const logs = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -371,6 +379,7 @@ describe("open command", () => {
         await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -386,6 +395,7 @@ describe("open command", () => {
         const second = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -407,6 +417,7 @@ describe("open command", () => {
         const logs = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: "Kill the SSO redirect loop",
@@ -420,6 +431,7 @@ describe("open command", () => {
         expect(parse(await fsp.readFile(note, "utf8"))).toEqual({
             goal: "Kill the SSO redirect loop",
             repos: [],
+            branches: {},
             tickets: [],
             decisions: [],
             blockers: []
@@ -437,6 +449,7 @@ describe("open command", () => {
         await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -454,6 +467,7 @@ describe("open command", () => {
         const logs = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: "new goal",
@@ -465,6 +479,7 @@ describe("open command", () => {
         expect(parse(await fsp.readFile(note, "utf8"))).toEqual({
             goal: "new goal",
             repos: [],
+            branches: {},
             tickets: ["https://acme/PROJ-1"],
             decisions: [{ note: "keep v1 alive", repo: "api" }],
             blockers: [{ note: "needs api on :8080" }]
@@ -482,6 +497,7 @@ describe("open command", () => {
         await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: "keep me",
@@ -494,6 +510,7 @@ describe("open command", () => {
         const second = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -520,6 +537,8 @@ describe("open command", () => {
                 "\n" +
                 "repos: []\n" +
                 "\n" +
+                "branches: {}\n" +
+                "\n" +
                 "tickets: []\n" +
                 "\n" +
                 "decisions: []\n" +
@@ -536,6 +555,7 @@ describe("open command", () => {
         const logs = await captureLogs(async () => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -566,6 +586,7 @@ describe("open command", () => {
             try {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: "does-not-exist",
                     goal: undefined,
@@ -591,6 +612,7 @@ describe("open command", () => {
             try {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -623,6 +645,7 @@ describe("open command", () => {
             const logs = await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -657,6 +680,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: "scoped goal",
@@ -668,6 +692,7 @@ describe("open command", () => {
             expect(parse(await fsp.readFile(note, "utf8"))).toEqual({
                 goal: "scoped goal",
                 repos: ["api"],
+                branches: {},
                 tickets: [],
                 decisions: [],
                 blockers: []
@@ -690,6 +715,7 @@ describe("open command", () => {
                 try {
                     await open.run({
                         "no-hooks": false,
+                        branch: undefined,
                         task: "alpha",
                         from: undefined,
                         goal: undefined,
@@ -720,6 +746,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -732,6 +759,7 @@ describe("open command", () => {
             const logs = await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -758,6 +786,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -769,6 +798,7 @@ describe("open command", () => {
             const logs = await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -799,6 +829,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -827,6 +858,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -841,6 +873,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -871,6 +904,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -888,6 +922,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -926,6 +961,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -938,6 +974,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -962,6 +999,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1017,6 +1055,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1056,6 +1095,7 @@ describe("open command", () => {
             const logs = await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1082,6 +1122,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1105,6 +1146,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1136,6 +1178,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1179,6 +1222,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1214,6 +1258,7 @@ describe("open command", () => {
                 json = await captureJson<OpenJson>(async () => {
                     await open.run({
                         "no-hooks": false,
+                        branch: undefined,
                         task: "alpha",
                         from: undefined,
                         goal: undefined,
@@ -1255,6 +1300,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1273,6 +1319,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1300,6 +1347,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1322,6 +1370,7 @@ describe("open command", () => {
             expect(json.note).toEqual({
                 goal: "<one line: what done looks like & why>",
                 repos: [],
+                branches: {},
                 tickets: [],
                 decisions: [],
                 blockers: [],
@@ -1338,6 +1387,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: "ship it",
@@ -1349,6 +1399,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1368,6 +1419,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1399,6 +1451,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1417,6 +1470,7 @@ describe("open command", () => {
             await captureLogs(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1434,6 +1488,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1452,6 +1507,7 @@ describe("open command", () => {
             const json = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": true,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1481,6 +1537,7 @@ describe("open command", () => {
                 json = await captureJson<OpenJson>(async () => {
                     await open.run({
                         "no-hooks": false,
+                        branch: undefined,
                         task: "alpha",
                         from: undefined,
                         goal: undefined,
@@ -1525,6 +1582,7 @@ describe("open command", () => {
                 json = await captureJson<OpenJson>(async () => {
                     await open.run({
                         "no-hooks": false,
+                        branch: undefined,
                         task: "alpha",
                         from: undefined,
                         goal: undefined,
@@ -1555,6 +1613,7 @@ describe("open command", () => {
             const rerun = await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1574,6 +1633,7 @@ describe("open command", () => {
             await captureJson<OpenJson>(async () => {
                 await open.run({
                     "no-hooks": false,
+                    branch: undefined,
                     task: "alpha",
                     from: undefined,
                     goal: undefined,
@@ -1610,6 +1670,7 @@ describe("open command", () => {
         const openAlpha = async (): Promise<void> => {
             await open.run({
                 "no-hooks": false,
+                branch: undefined,
                 task: "alpha",
                 from: undefined,
                 goal: undefined,
@@ -1737,6 +1798,173 @@ describe("open command", () => {
             expect(rerun.repos).toEqual([{ name: "api", status: "skipped" }])
             expect(rerun.carry).toEqual([])
             expect(fs.existsSync(carried)).toBe(false)
+        })
+    })
+
+    describe("branch adoption", () => {
+        // The parsed note's branches map after an open, for assertions.
+        const readBranches = async (
+            task: string
+        ): Promise<Record<string, unknown>> => {
+            const file = path.join(root, "tasks", task, UBERTASK_FILENAME)
+            return parse(await fsp.readFile(file, "utf8")).branches
+        }
+
+        it("adopts a PRE-EXISTING local branch (no -b) and records it adopted, no base", async () => {
+            await makeSource("api")
+            await register(["api"])
+            // A branch that already exists in the source clone — open must
+            // attach to it, not recreate it. No gh here, so no base discovered.
+            await sh(
+                path.join(root, "source", "api"),
+                "branch",
+                "feature/x",
+                "main"
+            )
+
+            const logs = await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: ["api=feature/x"],
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            // The worktree is checked out ON the adopted branch.
+            expect(await branchAt("api", "alpha")).toBe("feature/x")
+            expect(logs.join("\n")).toContain("adopting feature/x")
+            // Recorded adopted with no base (no PR was found).
+            expect(await readBranches("alpha")).toEqual({
+                api: { name: "feature/x", adopted: true }
+            })
+        })
+
+        it("creates task/<task> when the --branch name does not exist yet", async () => {
+            await makeSource("api")
+            await register(["api"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: ["api=feature/new"],
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            // A fresh branch was cut at the --branch name; recorded NOT adopted,
+            // no base — so it persists (a non-default name is branch-worthy).
+            expect(await branchAt("api", "alpha")).toBe("feature/new")
+            expect(await readBranches("alpha")).toEqual({
+                api: { name: "feature/new", adopted: false }
+            })
+        })
+
+        it("discovers the base from the adopted head's open PR (baseRefName)", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await sh(
+                path.join(root, "source", "api"),
+                "branch",
+                "feature/x",
+                "main"
+            )
+            // Stub gh: available, and `pr view <head>` reports a base of develop.
+            const fake: Gh = async (args) => {
+                if (args[0] === "--version") {
+                    return "gh 2.0.0"
+                }
+                return JSON.stringify({
+                    number: 5,
+                    url: "https://github.com/acme/api/pull/5",
+                    isDraft: true,
+                    state: "OPEN",
+                    baseRefName: "develop"
+                })
+            }
+            setGh(fake)
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: ["api=feature/x"],
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            // The discovered PR base is persisted alongside the adopted branch.
+            expect(await readBranches("alpha")).toEqual({
+                api: { name: "feature/x", adopted: true, base: "develop" }
+            })
+        })
+
+        it("a plain open (no --branch) records NO branches map (legacy bytes preserved)", async () => {
+            await makeSource("api")
+            await register(["api"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: undefined,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            // task/<task> created, nothing branch-worthy → the note has no
+            // branches recorded (branchFor falls back to task/<task>).
+            expect(await branchAt("api", "alpha")).toBe("task/alpha")
+            expect(await readBranches("alpha")).toEqual({})
+        })
+
+        it("errors when --branch names a repo outside the open's scope", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            await expect(
+                open.run({
+                    "no-hooks": false,
+                    // Scope is api only, but a branch is named for web.
+                    branch: ["web=feature/x"],
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["api"]
+                })
+            ).rejects.toThrow("names a repo outside this open's scope")
+            // Nothing was opened — the guard fired before any worktree.
+            expect(fs.existsSync(path.join(root, "tasks", "alpha"))).toBe(false)
+        })
+
+        it("a bare --branch name applies to every in-scope repo", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: ["shared/feature"],
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: undefined
+                })
+            })
+
+            expect(await branchAt("api", "alpha")).toBe("shared/feature")
+            expect(await branchAt("web", "alpha")).toBe("shared/feature")
         })
     })
 })

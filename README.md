@@ -109,6 +109,11 @@ goal: |
 repos:
   - api
   - web
+branches:
+  api:
+    name: feat/akko-rename
+    adopted: true
+    base: develop
 tickets:
   - https://example.com/ACME-1234
 decisions:
@@ -133,7 +138,7 @@ decisions:
 
 | Command | What it does |
 | --- | --- |
-| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`; repos scoped via `--repos` clone on demand. |
+| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`, `--branch`; repos scoped via `--repos` clone on demand. `--branch <repo>=<name>` (or a bare `--branch <name>` for all repos) **adopts** an existing branch instead of creating `task/<task>` — `close`/`prune` then keep that branch. |
 | `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
 | `uberepo diff <task>` | Show the task's footprint: commits ahead + diffstat per repo. |
 | `uberepo context <task>` | Everything to resume a task — note, per-repo state, PR state — as a paste-ready markdown brief. |
