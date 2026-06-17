@@ -9,15 +9,19 @@ prefer it if this file and the CLI ever disagree.
 
     <workspace>/
     ├── uberepo.json          # manifest: the registered repos, hooks, carry
-    ├── source/<name>/        # canonical clone of each repo — DON'T work here
-    └── tasks/<task>/<name>/  # per-task worktree of each repo, on branch task/<task>
+    ├── source/<repo>/        # canonical clone of each repo — DON'T work here
+    └── tasks/<task>/<name>/  # per-task worktree, on branch task/<task> (or task/<task>@<alias>)
 
-- `source/<name>/` is the shared base clone. Never edit, commit, branch, or run
+- `source/<repo>/` is the shared base clone. Never edit, commit, branch, or run
   raw `git` in it.
-- `tasks/<task>/<name>/` is where you work. If your CWD is under `tasks/<task>/`,
-  you are already in a task worktree — commit there.
-- One task = one branch (`task/<task>`) across every repo. Switch tasks by
-  switching directories, not by `git checkout`.
+- `tasks/<task>/<name>/` is where you work. `<name>` is the **participant**: a bare
+  repo (`web`, branch `task/<task>`) or a `repo@alias` token (`web@auth`, branch
+  `task/<task>@auth`) when one repo carries several branches in the task. The folder
+  is flat one level either way, and all of a repo's participants share its one
+  `source/<repo>` clone. Under `tasks/<task>/`, you're already in a worktree — commit there.
+- One task = one branch per participant: `task/<task>` for a plain repo, an extra
+  `repo@alias` participant for another branch in the same repo. Switch by switching
+  directories, not by `git checkout`.
 
 ## Discover state (machine-readable)
 
@@ -92,9 +96,17 @@ cloned repo, off each clone's current HEAD.
   `--repos` on it leaves it unscoped and simply clones+opens any named repo not
   already present, never stranding the worktrees it already owns. Omit `--repos`
   to leave the scope unchanged. No `--repos` ever = unscoped.
+- **`repo@alias` — several branches in one repo.** A `--repos` entry (and a `repos:`
+  note entry) is `repo` or `repo@alias`. The same repo may appear several times with
+  different aliases; each is its own **participant** — its own worktree
+  (`tasks/<task>/repo@alias/`, flat) and branch (`task/<task>@alias`) — and they all
+  share the one `source/<repo>` clone. Bare `repo` is unchanged (`task/<task>`). A
+  repo or alias name may not contain `@`, `:`, or glob chars (`[ ] * ?`), be a Windows
+  reserved name (`con`/`prn`/`aux`/`nul`/`com1`–`9`/`lpt1`–`9`), or end in a dot or
+  space; participants must be unique case-insensitively.
 - **Named repos clone on demand.** A repo explicitly asked for (named by
   `--repos` now, or stored in the note's `repos:` on a re-open) that is
-  registered but not yet cloned is cloned into `source/<name>` first — its
+  registered but not yet cloned is cloned into `source/<repo>` first — its
   `pre-clone`/`post-clone` hooks fire exactly as under `uberepo clone` — then
   opened like any other repo. ONLY explicitly named repos do this; an unscoped
   open with no `--repos` never clones anything. A failed on-demand clone is
@@ -105,7 +117,7 @@ cloned repo, off each clone's current HEAD.
   since the first run.
 - If `uberepo.json` declares [carry](#carry--local-files-into-worktrees)
   patterns, matching untracked local files (`.env` and friends) are copied
-  from `source/<name>` into each fresh worktree, before its `post-open` hook.
+  from `source/<repo>` into each fresh worktree, before its `post-open` hook.
 
 ### Work — edit, commit, push (per repo)
 
@@ -133,10 +145,11 @@ Fetches and rebases each worktree onto its repo's fresh default branch.
   multi-commit branch can differ. Exits 0 even when conflicts are forecast.
   Needs git >= 2.38.
 
-### `uberepo ship <task>` — push + open a draft PR per repo
+### `uberepo ship <task>` — push + open a draft PR per branch
 
-Pushes each repo's `task/<task>` branch and opens a **draft** pull request for it.
-One PR per repo; nothing is merged.
+Pushes each participant's branch and opens a **draft** pull request for it. One PR
+per branch — a repo with several participants gets several PRs, grouped under it and
+sharing its base discovery and PR-template lookup; nothing is merged.
 
 - **Requires the GitHub CLI** (`gh`) unless `--no-pr`: install https://cli.github.com
   then `gh auth login`. ship shells out to `gh` (it does not call the API), running
@@ -171,7 +184,9 @@ reported and the run continues to the rest, then exits non-zero.
 
 ### `uberepo close <task>` — finish a task
 
-Removes the worktrees and deletes the `task/<task>` branch in every repo.
+Removes every participant's worktree and deletes its branch in every repo — a repo
+with several participants loses all of them, but the shared `source/<repo>` clone
+stays and an adopted branch is never deleted.
 
 - **Refuses any repo with uncommitted OR unmerged work.** Push your branches
   first.
@@ -211,22 +226,24 @@ task on `close`.
         repo: web
 
 - `goal` — one-line `|` block: what done looks like and why. Always set it.
-- `repos` — the task's declared **scope**: the `source/<name>` repos it owns.
+- `repos` — the task's declared **scope**: the participants it owns, each a bare repo
+  or a `repo@alias` token (`source/<repo>` is the shared clone behind it).
   `open --repos` writes it and only ever GROWS it (additive — it never narrows an
   existing scope); `sync`/`close`/`prune` act only on these repos and warn about a
   worktree outside the scope. Empty (`repos: []`) = unscoped (every cloned repo)
   and stays empty — an unscoped task can't be narrowed by `--repos`. This is the
   task's scope — distinct from a decision/blocker item's `repo:`.
-- `branches` — per-repo branch overrides, keyed by `source/<name>`: each entry is
-  `{ name, adopted, base? }`. `open --branch` writes one only for a repo whose branch
-  deviates from `task/<task>` (a plain task branch records nothing and resolves by
-  default). `adopted: true` marks a pre-existing branch uberepo attached to rather
+- `branches` — branch overrides, keyed by the **participant token** (`web` or
+  `web@auth`): each entry is `{ name, adopted, base? }`. A participant on its default
+  branch — `task/<task>` (bare) or `task/<task>@<alias>` (aliased) — records nothing
+  and resolves by default; an entry appears only when adoption or `--branch` deviates
+  from it. `adopted: true` marks a pre-existing branch uberepo attached to rather
   than created — `close`/`prune` keep it; `base` is its rebase/PR target, auto-filled
   from the branch's PR for adopted branches, else the repo default.
 - `tickets` — list of URLs (issue, PR, doc, thread).
 - `decisions` / `blockers` — lists of `{ note: |, repo? }`. `note` is a `|` literal
   block (free text — colons, `#`, slashes need no quoting). `repo:` is optional —
-  a `source/<name>` when the item is about one repo; omit it for cross-cutting items.
+  a `source/<repo>` when the item is about one repo; omit it for cross-cutting items.
 
 ### Keep it honest
 
@@ -267,16 +284,16 @@ one (already cloned, already open, dirty, nothing to ship).
 
 | Event | Around | cwd |
 | --- | --- | --- |
-| `pre-clone` | a repo's fresh clone | workspace root (`UBEREPO_REPO_PATH` = the would-be `source/<name>`) |
-| `post-clone` | after the clone lands | `source/<name>/` |
-| `pre-open` | a new task worktree | `source/<name>/` (`UBEREPO_REPO_PATH` = the would-be worktree) |
+| `pre-clone` | a repo's fresh clone | workspace root (`UBEREPO_REPO_PATH` = the would-be `source/<repo>`) |
+| `post-clone` | after the clone lands | `source/<repo>/` |
+| `pre-open` | a new task worktree | `source/<repo>/` (`UBEREPO_REPO_PATH` = the would-be worktree) |
 | `post-open` | after the worktree lands | `tasks/<task>/<name>/` |
 | `pre-sync` | a worktree's rebase | `tasks/<task>/<name>/` |
 | `post-sync` | after a clean rebase | `tasks/<task>/<name>/` |
 | `pre-ship` | a repo's push + PR | `tasks/<task>/<name>/` |
 | `post-ship` | after push (and PR unless `--no-pr`) | `tasks/<task>/<name>/` |
 | `pre-close` | a worktree's teardown | `tasks/<task>/<name>/` |
-| `post-close` | after worktree + branch are gone | `source/<name>/` (`UBEREPO_REPO_PATH` = the removed worktree) |
+| `post-close` | after worktree + branch are gone | `source/<repo>/` (`UBEREPO_REPO_PATH` = the removed worktree) |
 
 The clone events fire wherever a clone actually happens — `uberepo clone`, or
 an `open` cloning a scoped repo on demand — always with the same cwd and the
@@ -291,11 +308,11 @@ with no `hooks` key behaves exactly as before — hooks are entirely opt-in.
 | --- | --- |
 | `UBEREPO_EVENT` | the event name (one of the ten above) |
 | `UBEREPO_WORKSPACE` | absolute workspace root |
-| `UBEREPO_REPO` | the repo's flat `source/<name>` name |
+| `UBEREPO_REPO` | the participant: the bare repo name (`web`), or the `repo@alias` token (`web@auth`) for an aliased worktree |
 | `UBEREPO_REPO_PATH` | absolute path of the dir the event is about (usually the cwd; see table) |
 | `UBEREPO_REPO_URL` | the repo's registered clone URL |
 | `UBEREPO_TASK` | the task name (empty for the clone events) |
-| `UBEREPO_BRANCH` | the repo's task branch — `task/<task>` by default, or the adopted / `--branch` name when one was set (empty for the clone events) |
+| `UBEREPO_BRANCH` | the participant's branch — `task/<task>` (bare) or `task/<task>@<alias>` (aliased) by default, or the adopted / `--branch` name when one was set (empty for the clone events) |
 | `UBEREPO_PR_URL` | the PR's URL in `post-ship` once created/found; empty otherwise (incl. `--no-pr`) |
 
 - **cwd gotcha:** a hook runs with its cwd set to the dir in the table, not the
@@ -310,7 +327,7 @@ with no `hooks` key behaves exactly as before — hooks are entirely opt-in.
 ## Carry — local files into worktrees
 
 A fresh worktree has only tracked files, so untracked local config (`.env`,
-override files, certs) stays behind in `source/<name>`. The top-level `carry`
+override files, certs) stays behind in `source/<repo>`. The top-level `carry`
 field in `uberepo.json` names the untracked files to copy into task worktrees.
 It's an array (global — every repo carries it) **or** an object keyed by repo
 name (per repo), never both; omit it and nothing is carried. A per-repo key
@@ -347,7 +364,7 @@ URL strings.
 | `uberepo init [name]` | Create a new workspace (manifest + agent files). |
 | `uberepo add <url>...` | Register one or more repos in one call. |
 | `uberepo remove <url>` | Unregister a repo. |
-| `uberepo clone [--repos <name>...]` | Clone every registered repo into `source/<name>` (skips ones already cloned); `--repos` clones only the named ones (an unknown name is an error). |
+| `uberepo clone [--repos <name>...]` | Clone every registered repo into `source/<repo>` (skips ones already cloned); `--repos` clones only the named ones (an unknown name is an error). |
 | `uberepo pull` | Fast-forward every cloned repo in `source/` to its origin (skips dirty or diverged repos). |
 
 - `add`/`remove` match repos by host/owner/repo identity, so any URL form works.
@@ -375,6 +392,10 @@ URL strings.
 Pass `--json` to any command for one JSON object describing its outcome — no
 human lines. Stable, additive contract; parse this instead of scraping text.
 Optional keys (`reason`, `error`, `note`) are omitted when they don't apply.
+
+Per-participant `name`/`repo` fields carry the **participant token** — the bare repo
+(`web`) or the `repo@alias` form (`web@auth`) — so a repo's several branches stay
+distinct in the output.
 
 | Command | JSON shape |
 | --- | --- |

@@ -1,5 +1,13 @@
 import * as path from "node:path"
-import { baseFor, branchFor, taskBranch, worktreePath } from "@/tasks"
+import {
+    baseFor,
+    branchFor,
+    participantBranch,
+    sourceName,
+    splitParticipant,
+    taskBranch,
+    worktreePath
+} from "@/tasks"
 
 describe("worktreePath", () => {
     it("joins root/tasks/<task>/<name>", () => {
@@ -11,6 +19,53 @@ describe("worktreePath", () => {
     it("uses the platform separator via path.join", () => {
         expect(worktreePath("/ws", "t", "n")).toBe(
             ["", "ws", "tasks", "t", "n"].join(path.sep)
+        )
+    })
+
+    it("keeps an aliased participant as a FLAT one-level folder name", () => {
+        // The typed token IS the folder; `@` is not a separator here.
+        expect(worktreePath("/ws", "t", "autopilot@bug-fix")).toBe(
+            path.join("/ws", "tasks", "t", "autopilot@bug-fix")
+        )
+    })
+})
+
+describe("splitParticipant", () => {
+    it("returns the bare repo with no alias for a plain token", () => {
+        expect(splitParticipant("web")).toEqual({ repo: "web" })
+    })
+
+    it("splits repo@alias on the first @", () => {
+        expect(splitParticipant("autopilot@bug-fix")).toEqual({
+            repo: "autopilot",
+            alias: "bug-fix"
+        })
+    })
+
+    it("a trailing @ with nothing after is a bare repo (no empty alias)", () => {
+        expect(splitParticipant("web@")).toEqual({ repo: "web" })
+    })
+})
+
+describe("sourceName", () => {
+    it("is the repo for a bare token, the repo part for an aliased one", () => {
+        // THE seam: aliased participants share one source/<repo> clone.
+        expect(sourceName("web")).toBe("web")
+        expect(sourceName("autopilot@bug-fix")).toBe("autopilot")
+        expect(sourceName("autopilot@add-feature")).toBe("autopilot")
+    })
+})
+
+describe("participantBranch", () => {
+    it("is task/<task> for a bare participant", () => {
+        expect(participantBranch("alpha", "web")).toBe("task/alpha")
+    })
+
+    it("is task/<task>@<alias> for an aliased participant", () => {
+        // `@` leaf (not `/`) so it sits beside a bare task/<task> in git's ref
+        // store without collision.
+        expect(participantBranch("alpha", "autopilot@bug-fix")).toBe(
+            "task/alpha@bug-fix"
         )
     })
 })
@@ -44,6 +99,30 @@ describe("branchFor", () => {
             "feat/sso"
         )
     })
+
+    it("falls back to the ALIASED default for an aliased participant with no entry", () => {
+        // An aliased participant needs no branches entry: branchFor
+        // reconstructs task/<task>@<alias> from the token itself.
+        expect(branchFor("feature", "autopilot@bug-fix", {})).toBe(
+            "task/feature@bug-fix"
+        )
+        expect(branchFor("feature", "autopilot@add-feature", undefined)).toBe(
+            "task/feature@add-feature"
+        )
+    })
+
+    it("keys overrides by the FULL participant token, so a repo's aliases stay distinct", () => {
+        const branches = {
+            "autopilot@bug-fix": { name: "fix/login" },
+            "autopilot@add-feature": { name: "feat/sso" }
+        }
+        expect(branchFor("feature", "autopilot@bug-fix", branches)).toBe(
+            "fix/login"
+        )
+        expect(branchFor("feature", "autopilot@add-feature", branches)).toBe(
+            "feat/sso"
+        )
+    })
 })
 
 describe("baseFor", () => {
@@ -59,5 +138,14 @@ describe("baseFor", () => {
 
     it("returns the persisted base when one was recorded (an adopted branch)", () => {
         expect(baseFor("api", { api: { base: "develop" } })).toBe("develop")
+    })
+
+    it("keys the base by the full participant token (per-alias bases)", () => {
+        const branches = {
+            "autopilot@bug-fix": { base: "develop" },
+            "autopilot@add-feature": { base: "release/2" }
+        }
+        expect(baseFor("autopilot@bug-fix", branches)).toBe("develop")
+        expect(baseFor("autopilot@add-feature", branches)).toBe("release/2")
     })
 })

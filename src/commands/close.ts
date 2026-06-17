@@ -1,9 +1,8 @@
 import * as fs from "node:fs"
-import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
 import { carryDrift } from "@/carry"
-import { Config, repositoryUrl } from "@/config"
+import { Config } from "@/config"
 import git from "@/git"
 import { type HookResult, runHook } from "@/hooks"
 import { force } from "@/options/force"
@@ -13,10 +12,11 @@ import {
     branchFor,
     partitionScope,
     readNote,
+    sourceName,
+    taskParticipants,
     taskPath,
     worktreePath
 } from "@/tasks"
-import { normalizeRepository } from "@/url"
 
 // One repo's close outcome: `closed` (worktree + branch removed) or `skipped`
 // (left intact, `reason` mirroring the human line: uncommitted changes,
@@ -57,25 +57,18 @@ export default defineCommand({
         let closed = 0
         let skipped = 0
 
-        // Only repos that are cloned AND have this task's worktree participate;
-        // everything else is silently irrelevant to close. The registered URL
-        // rides along so a fired hook can surface it as UBEREPO_REPO_URL.
-        const present: {
-            name: string
-            source: string
-            dest: string
-            url: string
-        }[] = []
-        for (const entry of config.repositories) {
-            const url = repositoryUrl(entry)
-            const { name } = normalizeRepository(url)
-            const source = path.join(root, "source", name)
-            const dest = worktreePath(root, argv.task, name)
-            if (!fs.existsSync(source) || !fs.existsSync(dest)) {
-                continue
-            }
-            present.push({ name, source, dest, url })
-        }
+        // Only PARTICIPANTS whose repo is cloned AND that have a worktree folder
+        // participate; everything else is silently irrelevant to close. A repo
+        // may back several participant folders — each is torn down on its own
+        // (worktree + its branch), sharing only the source/<repo> clone, which
+        // close NEVER removes. The registered URL rides along so a fired hook can
+        // surface it as UBEREPO_REPO_URL; `dest` is the participant worktree.
+        const present = taskParticipants(config, root, argv.task).map((p) => ({
+            name: p.name,
+            source: p.source,
+            dest: worktreePath(root, argv.task, p.name),
+            url: p.url
+        }))
 
         // Honour the task's declared scope: close only its owned repos. A
         // worktree outside a non-empty scope is drift — warn and leave it
@@ -178,9 +171,11 @@ export default defineCommand({
             // Carried local files live outside git, so the dirty/unmerged
             // guards never see an edited .env — surface the divergence while
             // the bytes still exist. Warn-only: close proceeds regardless.
+            // Pattern lookup is by the bare repo (carry config is per-repo); the
+            // entry is tagged with the participant.
             const modified = await carryDrift({
                 config,
-                name,
+                name: sourceName(name),
                 source,
                 worktree: dest
             })

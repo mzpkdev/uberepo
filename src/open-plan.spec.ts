@@ -7,6 +7,8 @@ import {
     resolveBranchMode,
     summarize,
     validateBranchScope,
+    validateName,
+    validateParticipants,
     validateSuppliedRepos
 } from "@/open-plan"
 
@@ -51,6 +53,192 @@ describe("validateSuppliedRepos", () => {
         expect(() =>
             validateSuppliedRepos(["api", "ghost"], ["api", "web"])
         ).toThrow("ghost is not a registered repository")
+    })
+
+    it("validates the REPO part of a repo@alias participant, keeping the full token", () => {
+        // The alias is task-local and never registered — only `api` is checked.
+        expect(
+            validateSuppliedRepos(
+                ["api@bug-fix", "api@feature"],
+                ["api", "web"]
+            )
+        ).toEqual(["api@bug-fix", "api@feature"])
+    })
+
+    it("throws when an aliased participant's repo is not registered", () => {
+        expect(() =>
+            validateSuppliedRepos(["ghost@x"], ["api", "web"])
+        ).toThrow("ghost is not a registered repository")
+    })
+
+    it("keeps a repo repeated under different aliases (the whole feature)", () => {
+        expect(
+            validateSuppliedRepos(["api@one", "api@two", "api@one"], ["api"])
+        ).toEqual(["api@one", "api@two"])
+    })
+})
+
+describe("validateName — the per-name shape guard", () => {
+    it("accepts ordinary repo/alias names", () => {
+        expect(validateName("autopilot", "repo")).toBe("autopilot")
+        expect(validateName("bug-fix", "alias")).toBe("bug-fix")
+        expect(validateName("api.v2_x", "repo")).toBe("api.v2_x")
+    })
+
+    it("rejects an empty name", () => {
+        expect(() => validateName("", "alias")).toThrow("empty alias name")
+    })
+
+    it("rejects the @ separator inside a part", () => {
+        expect(() => validateName("a@b", "repo")).toThrow('may not contain "@"')
+    })
+
+    it("rejects : (illegal in a Windows filename)", () => {
+        expect(() => validateName("a:b", "alias")).toThrow(
+            'may not contain ":"'
+        )
+    })
+
+    it("rejects glob characters", () => {
+        for (const bad of ["a*", "a?", "a[b]", "[x"]) {
+            expect(() => validateName(bad, "repo")).toThrow("glob characters")
+        }
+    })
+
+    it("rejects Windows reserved device names, case-insensitively", () => {
+        for (const bad of ["con", "PRN", "Aux", "nul", "com1", "LPT9"]) {
+            expect(() => validateName(bad, "repo")).toThrow(
+                "Windows reserved device name"
+            )
+        }
+        // A name that merely CONTAINS one is fine.
+        expect(validateName("console", "repo")).toBe("console")
+        expect(validateName("com10", "repo")).toBe("com10")
+    })
+
+    it("rejects a trailing dot or space (Windows strips them)", () => {
+        expect(() => validateName("api.", "repo")).toThrow("dot or space")
+        expect(() => validateName("api ", "alias")).toThrow("dot or space")
+    })
+})
+
+describe("validateParticipants — the run's whole participant set", () => {
+    it("accepts bare repos, aliased participants, and a repo under several aliases", () => {
+        expect(() =>
+            validateParticipants([
+                "web",
+                "autopilot@bug-fix",
+                "autopilot@add-feature"
+            ])
+        ).not.toThrow()
+    })
+
+    it("validates both the repo and the alias parts", () => {
+        expect(() => validateParticipants(["autopilot@bad:alias"])).toThrow(
+            'alias name "bad:alias" may not contain ":"'
+        )
+        expect(() => validateParticipants(["bad*repo@x"])).toThrow(
+            "glob characters"
+        )
+    })
+
+    it("rejects two participants that differ only in case (filesystem fold)", () => {
+        expect(() => validateParticipants(["Web", "web"])).toThrow(
+            "differ only in case"
+        )
+        expect(() =>
+            validateParticipants(["autopilot@BugFix", "autopilot@bugfix"])
+        ).toThrow("differ only in case")
+    })
+
+    it("allows the exact same token twice (a no-op dedup, not a collision)", () => {
+        expect(() => validateParticipants(["web", "web"])).not.toThrow()
+    })
+})
+
+describe("planOpen — participant scope (aliases nest under a repo)", () => {
+    it("a scoped task carries aliased participants as targets, repo clustered + scope-ordered", () => {
+        const plan = planOpen(
+            input({
+                registered: ["autopilot", "web"],
+                cloned: ["autopilot", "web"],
+                storedScope: ["web", "autopilot@bug-fix", "autopilot@add"],
+                taskExists: true
+            })
+        )
+        // Same scope (participants), targets grouped by repo registration order
+        // (autopilot before web), aliases in their declared scope order.
+        expect(plan.scope).toEqual([
+            "web",
+            "autopilot@bug-fix",
+            "autopilot@add"
+        ])
+        expect(plan.targets).toEqual([
+            "autopilot@bug-fix",
+            "autopilot@add",
+            "web"
+        ])
+    })
+
+    it("a brand-new task seeds an aliased scope and targets each participant", () => {
+        const plan = planOpen(
+            input({
+                registered: ["autopilot"],
+                cloned: ["autopilot"],
+                suppliedScope: ["autopilot@bug-fix", "autopilot@add-feature"],
+                taskExists: false
+            })
+        )
+        expect(plan.scope).toEqual([
+            "autopilot@bug-fix",
+            "autopilot@add-feature"
+        ])
+        expect(plan.targets).toEqual([
+            "autopilot@bug-fix",
+            "autopilot@add-feature"
+        ])
+    })
+
+    it("notCloned maps a participant to its repo (an aliased target's repo is not 'uncloned')", () => {
+        const plan = planOpen(
+            input({
+                registered: ["autopilot", "web"],
+                cloned: ["autopilot"],
+                storedScope: ["autopilot@bug-fix"],
+                taskExists: true
+            })
+        )
+        // autopilot is cloned and backs the target → not in notCloned; web is
+        // registered, uncloned, and not a target → listed.
+        expect(plan.targets).toEqual(["autopilot@bug-fix"])
+        expect(plan.notCloned).toEqual(["web"])
+    })
+
+    it("unknownScope flags a participant whose REPO is unregistered", () => {
+        const plan = planOpen(
+            input({
+                registered: ["autopilot"],
+                cloned: ["autopilot"],
+                storedScope: ["autopilot@x", "ghost@y"],
+                taskExists: true
+            })
+        )
+        expect(plan.unknownScope).toEqual(["ghost@y"])
+        expect(plan.targets).toEqual(["autopilot@x"])
+        expect(plan.empty).toBe(false)
+    })
+
+    it("an uncloned aliased participant on a scoped task is still a target (cloned on demand)", () => {
+        const plan = planOpen(
+            input({
+                registered: ["autopilot"],
+                cloned: [],
+                storedScope: ["autopilot@bug-fix", "autopilot@add"],
+                taskExists: true
+            })
+        )
+        expect(plan.targets).toEqual(["autopilot@bug-fix", "autopilot@add"])
+        expect(plan.notCloned).toEqual([])
     })
 })
 

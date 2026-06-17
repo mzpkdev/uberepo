@@ -24,7 +24,10 @@ every repo carries the same patterns.
 
 As an **object**, it's per repo — keyed by repo name (the trailing slug of
 each URL in `repositories`), each value its own pattern list. A repo with no
-key carries nothing; a key matching no registered repo is warned about.
+key carries nothing; a key matching no registered repo is warned about. Keys are
+bare repo names, never the `repo@alias` participant tokens a task may use: a repo
+that carries several branches in one task shares one pattern set, and carry runs
+once per participant worktree.
 
 ```json
 {
@@ -85,10 +88,11 @@ Carry isn't a hook: `--no-hooks` doesn't skip it. To stop carrying, remove the
 patterns from `uberepo.json`.
 
 Under `--json`, `open` and `sync` report a `carry` array with one
-`{ repo, copied, keptExisting, skippedTracked }` entry per repo carry ran in —
+`{ repo, copied, keptExisting, skippedTracked }` entry per worktree carry ran in —
 a freshly created worktree on `open`, a cleanly rebased one on `sync` — and
-`close` reports `{ repo, modified }` entries for repos with divergent carried
-files.
+`close` reports `{ repo, modified }` entries for worktrees with divergent carried
+files. The `repo` field is the participant token, so each `repo@alias` worktree
+gets its own entry even though they share one pattern set.
 
 ## Carry gitignored files
 

@@ -1,9 +1,7 @@
-import * as fs from "node:fs"
-import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
 import { type CarryEntry, runCarry } from "@/carry"
-import { Config, repositoryUrl, type UberepoConfig } from "@/config"
+import { Config, type UberepoConfig } from "@/config"
 import git, { versionAtLeast } from "@/git"
 import { type HookResult, runHook } from "@/hooks"
 import { check } from "@/options/check"
@@ -15,9 +13,9 @@ import {
     partitionScope,
     readNote,
     type TaskNote,
+    taskParticipants,
     worktreePath
 } from "@/tasks"
-import { normalizeRepository } from "@/url"
 
 // One repo's sync outcome. `rebased` = task branch replayed onto the upstream,
 // `current` is reserved for an already-up-to-date repo, `conflict` = the rebase
@@ -70,26 +68,18 @@ export default defineCommand({
             return
         }
 
-        // The task's worktrees across cloned repos: a repo participates only
-        // when it is both cloned (source/<name>) and has this task's worktree.
-        // `url` is the registered URL, carried through so a fired post-sync hook
-        // can surface it as UBEREPO_REPO_URL.
-        const present: {
-            name: string
-            url: string
-            source: string
-            dest: string
-        }[] = []
-        for (const entry of config.repositories) {
-            const url = repositoryUrl(entry)
-            const { name } = normalizeRepository(url)
-            const source = path.join(root, "source", name)
-            const dest = worktreePath(root, argv.task, name)
-            if (!fs.existsSync(source) || !fs.existsSync(dest)) {
-                continue
-            }
-            present.push({ name, url, source, dest })
-        }
+        // The task's worktrees, by PARTICIPANT: every tasks/<task>/<name> folder
+        // (bare or aliased) whose repo is cloned. A repo's several aliased
+        // participants each rebase their own branch, sharing the source/<repo>
+        // clone. `url` is the registered URL, carried through so a fired
+        // post-sync hook can surface it as UBEREPO_REPO_URL.
+        const present = taskParticipants(config, root, argv.task).map((p) => ({
+            name: p.name,
+            repo: p.repo,
+            url: p.url,
+            source: p.source,
+            dest: worktreePath(root, argv.task, p.name)
+        }))
 
         // Honour the task's declared scope: act only on its owned repos. A
         // worktree outside a non-empty scope is drift — warn about it (never
@@ -204,10 +194,11 @@ export default defineCommand({
             terminal.json({ task: argv.task, onto, repos, hooks, carry })
         }
         for (const target of targets) {
-            const { name, url, source, dest } = target
+            const { name, repo: repoName, url, source, dest } = target
             const repo = git(source)
             const wt = repo.worktree(dest)
-            // This repo's branch to rebase (adopted/--branch, else task/<task>).
+            // This participant's branch to rebase (adopted/--branch, else its
+            // default: task/<task> bare, task/<task>@<alias> aliased).
             const branch = branchFor(argv.task, name, note?.branches)
 
             // Resolve the rebase target before fetching. An explicit --from ref
@@ -285,9 +276,11 @@ export default defineCommand({
             // Re-carry the configured untracked local files BEFORE post-sync
             // fires, mirroring open's ordering: existing files are never
             // overwritten, so this only fills in what the worktree is missing.
+            // Pattern lookup is by the bare repo; the entry is tagged with the
+            // participant.
             const carried = await runCarry({
                 config,
-                name,
+                name: repoName,
                 source,
                 worktree: dest
             })
@@ -360,18 +353,13 @@ const forecast = async (
         throw new Error(`sync --check needs git >= 2.38, found ${version}`)
     }
 
-    // The repos that can be forecast: registered AND cloned AND holding this
-    // task's worktree, in stable sorted order (matches diff/status/ship).
-    const present: string[] = []
-    for (const entry of config.repositories) {
-        const { name } = normalizeRepository(repositoryUrl(entry))
-        const source = path.join(root, "source", name)
-        const dest = worktreePath(root, task, name)
-        if (fs.existsSync(source) && fs.existsSync(dest)) {
-            present.push(name)
-        }
-    }
-    present.sort()
+    // The participants that can be forecast: every tasks/<task>/<name> folder
+    // (bare or aliased) whose repo is cloned, in stable sorted folder order
+    // (matches diff/status/ship). source/<repo> is shared by a repo's
+    // participants.
+    const participants = taskParticipants(config, root, task)
+    const sourceByName = new Map(participants.map((p) => [p.name, p.source]))
+    const present = participants.map((p) => p.name)
 
     // Honour the task's declared scope the way sync does (warn about strays,
     // act on the in-scope intersection), but report like diff: a scoped repo
@@ -400,14 +388,15 @@ const forecast = async (
 
     const repos: CheckRepo[] = []
     for (const name of targets) {
-        const source = path.join(root, "source", name)
         const dest = worktreePath(root, task, name)
         if (!present.includes(name)) {
             repos.push({ name, status: "skipped", reason: "no worktree" })
             continue
         }
-        const repo = git(source)
-        // This repo's branch to forecast (adopted/--branch, else task/<task>).
+        // Source is the shared source/<repo> clone (present, by the filter).
+        const repo = git(sourceByName.get(name) as string)
+        // This participant's branch to forecast (adopted/--branch, else its
+        // default).
         const branch = branchFor(task, name, note?.branches)
 
         // Resolve before fetching, the same order as sync: --from, then the

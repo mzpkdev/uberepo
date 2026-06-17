@@ -311,6 +311,68 @@ describe("branches map", () => {
     })
 })
 
+describe("aliased participants (multiple branches per repo)", () => {
+    it("parses a repo-qualified `repos:` list with @ participants", () => {
+        const note = parse(
+            "repos:\n  - autopilot@bug-fix\n  - autopilot@add-feature\n  - web\n"
+        )
+        expect(note.repos).toEqual([
+            "autopilot@bug-fix",
+            "autopilot@add-feature",
+            "web"
+        ])
+    })
+
+    it("parses a branches map keyed by an aliased participant token (@ in the key)", () => {
+        const note = parse(
+            "branches:\n" +
+                "  autopilot@bug-fix:\n" +
+                "    name: fix/login\n" +
+                "    adopted: true\n" +
+                "    base: develop\n" +
+                "  autopilot@add-feature:\n" +
+                "    name: task/alpha@add-feature\n" +
+                "    adopted: false\n"
+        )
+        expect(note.branches).toEqual({
+            "autopilot@bug-fix": {
+                name: "fix/login",
+                adopted: true,
+                base: "develop"
+            },
+            "autopilot@add-feature": {
+                name: "task/alpha@add-feature",
+                adopted: false
+            }
+        })
+    })
+
+    it("round-trips a full multi-branch note (parse∘serialize = identity)", () => {
+        const note: Ubertask = {
+            goal: "two PRs in autopilot",
+            repos: ["autopilot@bug-fix", "autopilot@add-feature", "web"],
+            branches: {
+                "autopilot@bug-fix": {
+                    name: "fix/login",
+                    adopted: true,
+                    base: "develop"
+                },
+                "autopilot@add-feature": {
+                    name: "task/alpha@add-feature",
+                    adopted: false
+                }
+            },
+            tickets: [],
+            decisions: [],
+            blockers: []
+        }
+        expect(parse(serialize(note))).toEqual(note)
+        // The @ participant survives as both a repos: item and a branches: key.
+        expect(serialize(note)).toContain("  - autopilot@bug-fix")
+        expect(serialize(note)).toContain("  autopilot@bug-fix:")
+    })
+})
+
 describe("read / write", () => {
     let tmp: string
 

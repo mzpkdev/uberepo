@@ -1,7 +1,7 @@
 import type { CarryEntry } from "@/carry"
 import type { HookResult } from "@/hooks"
 import type { CloneRepo } from "@/sources"
-import type { TaskNote } from "@/tasks"
+import { ALIAS_SEPARATOR, splitParticipant, type TaskNote } from "@/tasks"
 
 // The PURE decision core of `open`. Everything here works on in-memory values —
 // no fs, no git, no terminal — so the scope/note/exit-code rules can be reasoned
@@ -73,13 +73,13 @@ export const parseBranchSpecs = (tokens: string[] | undefined): BranchSpec => {
     return spec
 }
 
-// Validate the per-repo `--branch <repo>=<name>` keys against the run's
-// targets BEFORE anything is created: a branch named for a repo that is not in
-// the task's open scope this run is an error (consistent with open's
-// fail-loud unknown-name guard — a `--branch repo=name` for a repo --repos
-// didn't put in scope is a typo or a stale command, never silently ignored).
-// The bare-name form is scope-agnostic (it applies to whatever IS in scope),
-// so it is not checked here. Throws on the first offending repo.
+// Validate the per-participant `--branch <repo[@alias]>=<name>` keys against the
+// run's targets BEFORE anything is created: a branch named for a participant
+// that is not in the task's open scope this run is an error (consistent with
+// open's fail-loud unknown-name guard — a `--branch repo=name` for a participant
+// --repos didn't put in scope is a typo or a stale command, never silently
+// ignored). The bare-name form is scope-agnostic (it applies to whatever IS in
+// scope), so it is not checked here. Throws on the first offending participant.
 export const validateBranchScope = (
     spec: BranchSpec,
     targets: string[]
@@ -94,10 +94,11 @@ export const validateBranchScope = (
     }
 }
 
-// The resolved branch NAME for one repo from a BranchSpec: its explicit
-// per-repo entry, else the bare all-repos name, else the task/<task> default.
-// Pure — the caller passes the default in (taskBranch(task)) so this module
-// stays free of the task→branch convention.
+// The resolved branch NAME for one participant from a BranchSpec: its explicit
+// per-participant entry (keyed by the full `repo` / `repo@alias` token), else
+// the bare all-repos name, else the participant default. Pure — the caller
+// passes the default in (participantBranch(task, name)) so this module stays
+// free of the task→branch convention.
 export const branchNameFor = (
     spec: BranchSpec,
     repo: string,
@@ -131,12 +132,91 @@ export const resolveBranchMode = (exists: {
     return { mode: "create", track: false }
 }
 
-// Validate --repos BEFORE creating anything: every supplied name must be a
-// registered repo. It need NOT be cloned — a registered-but-uncloned name is the
-// on-demand clone path. Mirror clone's pre-flight collision guard — fail loud
-// and create nothing on the first unknown name, so a typo never half-opens a
-// task. Returns the supplied names de-duplicated in supplied order; [] when no
-// --repos was given.
+// Windows reserved device names — illegal as a file/dir name on Windows
+// regardless of extension (CON, PRN, …, COM1-9, LPT1-9). A task's folder is one
+// of these names, so a repo or alias matching one (case-insensitively) would
+// produce an unopenable worktree dir on Windows; reject it at open time on every
+// platform so a workspace stays portable.
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i
+
+// Validate one repo or alias NAME (a single token part, NOT a `repo@alias`
+// pair). Rejects what would break the folder/branch/note conventions: the
+// reserved separators (`@` would re-split a participant; `:` is illegal in a
+// Windows filename), glob metacharacters (`[ ] * ?` — these names feed
+// minimatch patterns and shell globs), Windows reserved device names, and a
+// trailing dot or space (Windows silently strips them, so two names would
+// collide on disk). Empty is rejected too (a `@bug-fix` with no repo, or a
+// `web@` with no alias, is malformed). Returns the name on success; throws a
+// fail-loud message naming the offending token otherwise. `kind` ("repo" /
+// "alias") only colours the message.
+export const validateName = (name: string, kind: "repo" | "alias"): string => {
+    if (name === "") {
+        throw new Error(`an empty ${kind} name is not allowed.`)
+    }
+    if (name.includes(ALIAS_SEPARATOR)) {
+        throw new Error(
+            `${kind} name "${name}" may not contain "${ALIAS_SEPARATOR}" — it separates a repo from its alias.`
+        )
+    }
+    if (name.includes(":")) {
+        throw new Error(
+            `${kind} name "${name}" may not contain ":" — it is illegal in a Windows filename.`
+        )
+    }
+    if (/[[\]*?]/.test(name)) {
+        throw new Error(
+            `${kind} name "${name}" may not contain glob characters ([ ] * ?).`
+        )
+    }
+    if (WINDOWS_RESERVED.test(name)) {
+        throw new Error(
+            `${kind} name "${name}" is a Windows reserved device name.`
+        )
+    }
+    if (/[. ]$/.test(name)) {
+        throw new Error(
+            `${kind} name "${name}" may not end with a dot or space (Windows strips them).`
+        )
+    }
+    return name
+}
+
+// Validate a run's full PARTICIPANT set up front (open time), before anything is
+// created. Each token is split into repo[@alias]; both parts pass validateName,
+// and the whole set is checked for case-INSENSITIVE uniqueness — macOS and
+// Windows fold filename case, so `Web` and `web` (or two `autopilot@BugFix` /
+// `autopilot@bugfix` participants) would map to one folder and clobber each
+// other. Throws on the first offender, naming it, so a typo never half-opens a
+// task. A repo MAY legitimately repeat with DIFFERENT aliases (that's the whole
+// feature), so uniqueness is over the full lowercased token, not the repo.
+export const validateParticipants = (tokens: string[]): void => {
+    const seen = new Map<string, string>()
+    for (const token of tokens) {
+        const { repo, alias } = splitParticipant(token)
+        validateName(repo, "repo")
+        if (alias !== undefined) {
+            validateName(alias, "alias")
+        }
+        const fold = token.toLowerCase()
+        const prior = seen.get(fold)
+        if (prior !== undefined && prior !== token) {
+            throw new Error(
+                `participants "${prior}" and "${token}" differ only in case — they would collide on a case-insensitive filesystem.`
+            )
+        }
+        seen.set(fold, token)
+    }
+}
+
+// Validate --repos BEFORE creating anything: every supplied participant's REPO
+// part must be a registered repo (the alias is task-local and never registered).
+// A repo need NOT be cloned — a registered-but-uncloned name is the on-demand
+// clone path. Mirror clone's pre-flight collision guard — fail loud and create
+// nothing on the first unknown repo, so a typo never half-opens a task. Returns
+// the supplied PARTICIPANT TOKENS de-duplicated in supplied order (a repo may
+// recur under different aliases); [] when no --repos was given. Name-shape
+// validation (separators, globs, reserved names, case collisions) is
+// validateParticipants' job — call it first.
 export const validateSuppliedRepos = (
     supplied: string[] | undefined,
     registered: string[]
@@ -145,25 +225,30 @@ export const validateSuppliedRepos = (
     if (supplied === undefined) {
         return result
     }
-    for (const name of supplied) {
-        if (!registered.includes(name)) {
+    for (const token of supplied) {
+        const { repo } = splitParticipant(token)
+        if (!registered.includes(repo)) {
             const known = registered.join(", ") || "(none registered)"
             throw new Error(
-                `${name} is not a registered repository — known: ${known}. Register it (or fix the name) before scoping a task to it.`
+                `${repo} is not a registered repository — known: ${known}. Register it (or fix the name) before scoping a task to it.`
             )
         }
-        if (!result.includes(name)) {
-            result.push(name)
+        if (!result.includes(token)) {
+            result.push(token)
         }
     }
     return result
 }
 
 // Everything planOpen needs to decide what `open` should do, gathered by the
-// shell from disk. `taskExists` (a note OR an open worktree is present) and
-// `hasNote` (a note actually parsed) are DISTINCT: both a brand-new task and an
-// existing unscoped one have an empty stored scope, but only the former lacks a
-// note, and --repos must seed the one while only growing the other.
+// shell from disk. `registered`/`cloned` are bare REPO names (the manifest's
+// unit). `storedScope`/`suppliedScope` are PARTICIPANT tokens (`repo` or
+// `repo@alias`) — a repo may appear several times under different aliases. The
+// plan maps each participant back to its repo (splitParticipant) to test
+// registration/clone state. `taskExists` (a note OR an open worktree is present)
+// and `hasNote` (a note actually parsed) are DISTINCT: both a brand-new task and
+// an existing unscoped one have an empty stored scope, but only the former lacks
+// a note, and --repos must seed the one while only growing the other.
 export type OpenInput = {
     registered: string[]
     cloned: string[]
@@ -174,11 +259,12 @@ export type OpenInput = {
     goal: string | undefined
 }
 
-// One repo's open outcome: `created` (a fresh worktree landed) or `skipped`
-// (its worktree was already open — the idempotent/recovery path — or no
-// worktree could be attempted, with `reason` set: a failed pre-open or
-// pre-clone hook, a failed on-demand clone, or a scope name that isn't
-// registered at all).
+// One PARTICIPANT's open outcome: `created` (a fresh worktree landed) or
+// `skipped` (its worktree was already open — the idempotent/recovery path — or
+// no worktree could be attempted, with `reason` set: a failed pre-open or
+// pre-clone hook, a failed on-demand clone, or a scope name whose repo isn't
+// registered at all). `name` is the participant token (`repo` or `repo@alias`),
+// the folder/JSON identity — distinct from the repo it clones from.
 export type OpenRepo = {
     name: string
     status: "created" | "skipped"
@@ -240,31 +326,52 @@ export const planOpen = (input: OpenInput): OpenPlan => {
         }
     }
     const scoped = scope.length > 0
-    // Worktree targets. Scoped: the in-scope REGISTERED repos (scope ∩
-    // registered, kept in registration order) — an in-scope repo that
-    // isn't cloned yet is cloned on demand, because a scoped name is an
-    // explicit ask for exactly that repo. Unscoped: every cloned repo PLUS any
-    // supplied --repos names (∩ registered) — naming a repo is an explicit ask
-    // for it, so it is cloned-on-demand + opened even on an unscoped task;
-    // without --repos this is exactly today's every-cloned-repo behaviour,
-    // which still never clones implicitly.
+    const isRegistered = (token: string): boolean =>
+        registered.includes(splitParticipant(token).repo)
+    // Worktree targets — PARTICIPANT tokens. Scoped: the in-scope participants
+    // whose repo is REGISTERED — an in-scope participant whose repo isn't cloned
+    // yet is cloned on demand, because a scoped name is an explicit ask. Ordered
+    // by (the repo's registration index, then the scope's own order) so bare
+    // repos keep registration order — the original contract — while a repo's
+    // several aliases cluster together in the order the scope declares them.
+    // Unscoped: every cloned repo as a BARE participant (registration order) PLUS
+    // any supplied --repos participants whose repo is registered and that aren't
+    // already one of those bare cloned entries — naming a participant is an
+    // explicit ask, so it is cloned-on-demand + opened even on an unscoped task;
+    // without --repos this is exactly today's every-cloned-repo behaviour, which
+    // still never clones implicitly. An aliased participant is only ever a target
+    // via an explicit scope/--repos entry, never implicitly.
+    const regIndex = (token: string): number =>
+        registered.indexOf(splitParticipant(token).repo)
     const targets = scoped
-        ? registered.filter((n) => scope.includes(n))
-        : registered.filter(
-              (n) => cloned.includes(n) || suppliedScope.includes(n)
-          )
+        ? scope
+              .filter(isRegistered)
+              .map((token, i) => ({ token, i }))
+              .sort(
+                  (a, b) => regIndex(a.token) - regIndex(b.token) || a.i - b.i
+              )
+              .map((e) => e.token)
+        : [
+              ...registered.filter((n) => cloned.includes(n)),
+              ...suppliedScope.filter(
+                  (token) => isRegistered(token) && !cloned.includes(token)
+              )
+          ]
 
-    // The uncloned repos this run will NOT touch (registered but outside the
-    // targets), warned + skipped the way status does.
+    // The repos a target will clone-or-open, so notCloned can exclude them. A
+    // participant maps to its repo; several participants may share one repo.
+    const targetRepos = new Set(targets.map((t) => splitParticipant(t).repo))
+    // The uncloned repos this run will NOT touch (registered but neither cloned
+    // nor backing a target), warned + skipped the way status does.
     const notCloned = registered.filter(
-        (name) => !cloned.includes(name) && !targets.includes(name)
+        (name) => !cloned.includes(name) && !targetRepos.has(name)
     )
 
-    // A scope name that isn't registered at all can be neither opened nor
-    // cloned (there is no URL to clone from). A note may legitimately outlive a
-    // repo's registration, so this is a per-repo skip — warned and recorded,
-    // never an abort.
-    const unknownScope = scope.filter((name) => !registered.includes(name))
+    // A scope participant whose repo isn't registered at all can be neither
+    // opened nor cloned (there is no URL to clone from). A note may legitimately
+    // outlive a repo's registration, so this is a per-participant skip — warned
+    // and recorded, never an abort.
+    const unknownScope = scope.filter((token) => !isRegistered(token))
 
     // Nothing to open: no worktree target survived (no cloned repo and no
     // --repos name to clone on demand). The unknownScope guard keeps an

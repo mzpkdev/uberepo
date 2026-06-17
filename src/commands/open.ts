@@ -11,6 +11,7 @@ import {
     planOpen,
     summarize,
     validateBranchScope,
+    validateParticipants,
     validateSuppliedRepos
 } from "@/open-plan"
 import { collectSources, openRepoWorktree } from "@/open-steps"
@@ -22,10 +23,10 @@ import { repos } from "@/options/repos"
 import { TEMPLATE_DIR } from "@/package-root"
 import type { CloneRepo } from "@/sources"
 import {
+    participantBranch,
     type TaskNote,
-    taskBranch,
-    UBERTASK_FILENAME,
-    worktreePath
+    taskPath,
+    UBERTASK_FILENAME
 } from "@/tasks"
 import type { UbertaskBranch } from "@/ubertask"
 import * as ubertask from "@/ubertask"
@@ -80,15 +81,33 @@ export default defineCommand({
         // unscoped open seeds a note, but the nothing-to-open path below does
         // not, so the open worktree dirs are consulted too: a re-open must
         // never strand a worktree the task already owns, note present or not.
-        const present = registered.filter((name) =>
-            fs.existsSync(worktreePath(root, argv.task, name))
-        )
+        // The participant folders already on disk for this task — any
+        // tasks/<task>/<name> subdir (bare repo OR repo@alias), not just the
+        // registered bare names, so an existing aliased worktree still marks the
+        // task as existing. A missing task dir reads as none.
+        let present: string[] = []
+        try {
+            present = fs
+                .readdirSync(taskPath(root, argv.task), {
+                    withFileTypes: true
+                })
+                .filter((e) => e.isDirectory())
+                .map((e) => e.name)
+        } catch {
+            // No task dir yet — brand-new task, no worktrees present.
+        }
         const taskExists = existing !== undefined || present.length > 0
 
+        // Validate the run's participant SHAPE up front (separators, globs,
+        // reserved names, case collisions) across both the stored scope and the
+        // newly supplied --repos, before anything is created — a malformed or
+        // colliding name must fail loud, never half-open a task.
+        validateParticipants([...storedScope, ...(argv.repos ?? [])])
         // Validate --repos BEFORE creating anything (deduped, supplied order;
-        // throws on the first unregistered name), then let the pure planner
+        // throws on the first unregistered repo), then let the pure planner
         // resolve the scope, the worktree targets, and the skip sets. The shell
-        // below only does the IO the plan calls for.
+        // below only does the IO the plan calls for. Each entry may be a
+        // `repo@alias` participant; only the repo part is checked for registration.
         const suppliedScope = validateSuppliedRepos(argv.repos, registered)
         const plan = planOpen({
             registered,
@@ -170,6 +189,9 @@ export default defineCommand({
         // optional carry entry, and whether a worktree actually landed. The loop
         // just aggregates those into the run's arrays; the fail-fast
         // worktree-create error propagates straight through to abort the run.
+        // `clonedRepos` tracks the bare repos clone-attempted this run so a repo
+        // backing several participants is cloned ONCE (the step consults +
+        // updates it). Shared across the loop's iterations via the one ctx.
         const ctx = {
             config,
             root,
@@ -177,12 +199,13 @@ export default defineCommand({
             branchSpec,
             base,
             urlByName,
-            noHooks: argv["no-hooks"]
+            noHooks: argv["no-hooks"],
+            clonedRepos: new Set<string>()
         }
-        // The branches each newly-created worktree landed on, keyed by repo —
-        // collected from the step outcomes to persist in the note's `branches:`
-        // map. Only `created` repos carry one; a skip (already open, hook gate,
-        // failed clone) records nothing this run.
+        // The branches each newly-created worktree landed on, keyed by the
+        // PARTICIPANT token — collected from the step outcomes to persist in the
+        // note's `branches:` map. Only `created` participants carry one; a skip
+        // (already open, hook gate, failed clone) records nothing this run.
         const branchRecords: Record<string, UbertaskBranch> = {}
         for (const name of plan.targets) {
             const out = await openRepoWorktree(name, ctx)
@@ -202,15 +225,25 @@ export default defineCommand({
             }
         }
 
-        // A branch record is worth persisting only when it deviates from the
-        // pure task/<task> default: an adopted branch, OR a created branch with
-        // a non-default name (an explicit --branch). A plain `open` that just
-        // cut task/<task> in every repo records nothing — preserving the
-        // no-clobber/idempotent note contract (a bare re-open never rewrites a
-        // hand-edited note). branchFor() falls back to task/<task> for those.
-        const persistBranches = Object.values(branchRecords).some(
-            (b) => b.adopted || b.name !== taskBranch(argv.task)
-        )
+        // The branch records worth persisting: only those that DEVIATE from the
+        // participant's default — an adopted branch, OR a created branch with a
+        // non-default name (an explicit --branch). A participant on its plain
+        // default (task/<task> bare, task/<task>@<alias> aliased) is dropped:
+        // branchFor() reconstructs that default from the token, so storing it
+        // would just be a redundant entry. This keeps the `branches:` map an
+        // overrides-only record even when some participants in the same open
+        // deviate and others don't.
+        const deviating: Record<string, UbertaskBranch> = {}
+        for (const [name, b] of Object.entries(branchRecords)) {
+            if (b.adopted || b.name !== participantBranch(argv.task, name)) {
+                deviating[name] = b
+            }
+        }
+        // Persist the map only when at least one participant deviated — a plain
+        // `open` that just cut every participant's default records nothing,
+        // preserving the no-clobber/idempotent note contract (a bare re-open
+        // never rewrites a hand-edited note).
+        const persistBranches = Object.keys(deviating).length > 0
 
         // Seed the task's durable note at the TASK level (sibling of the per-repo
         // worktree dirs), so it survives a fresh session as the standing "why".
@@ -266,12 +299,13 @@ export default defineCommand({
                 target.repos = action.repos
             }
             // Record the deviating branches (adopt / --branch) only — merging
-            // over any already stored, so a re-open that adopts a new repo adds
-            // to the map without dropping branches recorded earlier. A plain
-            // created task/<task> is NOT written (branchFor falls back to it),
-            // keeping the note free of redundant default entries.
+            // over any already stored, so a re-open that adopts a new
+            // participant adds to the map without dropping branches recorded
+            // earlier. A participant on its plain default is NOT written
+            // (branchFor reconstructs it), keeping the note free of redundant
+            // default entries.
             if (persistBranches) {
-                target.branches = { ...target.branches, ...branchRecords }
+                target.branches = { ...target.branches, ...deviating }
             }
             await effect(() => ubertask.write(note, target))
             projected = target

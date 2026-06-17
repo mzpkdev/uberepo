@@ -532,4 +532,59 @@ describe("status command", () => {
 
         expect(JSON.parse(written.join(""))).toEqual([])
     })
+
+    describe("aliased participants (multiple branches per repo)", () => {
+        // Open an aliased worktree on branch task/<task>@<alias>.
+        const openAliased = async (
+            name: string,
+            task: string,
+            alias: string
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                `task/${task}@${alias}`,
+                wt,
+                "main"
+            )
+            return wt
+        }
+
+        it("lists each of a repo's participants under the task, branch per participant", async () => {
+            await makeSource("autopilot")
+            await makeSource("web")
+            await register(["autopilot", "web"])
+            await openAliased("autopilot", "alpha", "bug-fix")
+            await openAliased("autopilot", "alpha", "add-feature")
+            await openWorktree("web", "alpha")
+
+            const parsed = JSON.parse(
+                (
+                    await captureJson(async () => {
+                        await status.run({ task: "alpha" })
+                    })
+                ).join("")
+            ) as Task[]
+
+            // Derived from `git worktree list`, sorted by folder — a repo's
+            // participants cluster, each carrying its own aliased branch.
+            expect(parsed[0].repos).toEqual([
+                {
+                    name: "autopilot@add-feature",
+                    branch: "task/alpha@add-feature",
+                    dirty: false
+                },
+                {
+                    name: "autopilot@bug-fix",
+                    branch: "task/alpha@bug-fix",
+                    dirty: false
+                },
+                { name: "web", branch: "task/alpha", dirty: false }
+            ])
+        })
+    })
 })

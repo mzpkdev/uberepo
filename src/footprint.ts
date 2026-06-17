@@ -1,15 +1,13 @@
-import * as fs from "node:fs"
-import * as path from "node:path"
-import { repositoryUrl, type UberepoConfig } from "@/config"
+import type { UberepoConfig } from "@/config"
 import git from "@/git"
 import {
     baseFor,
     branchFor,
     partitionScope,
     readNote,
+    taskParticipants,
     worktreePath
 } from "@/tasks"
-import { normalizeRepository } from "@/url"
 
 // A task's per-repo footprint — the read-only computation diff and context
 // share. Read-only by design: no fetch, no hooks, no carry. The comparison
@@ -79,19 +77,14 @@ export const taskFootprint = async (
     const note = await readNote(root, task)
     const branches = note?.branches
 
-    // The repos that can actually be reported: registered AND cloned
-    // (source/<name> exists) AND holding this task's worktree, in stable
-    // sorted order (matches status/ship).
-    const present: string[] = []
-    for (const entry of config.repositories) {
-        const { name } = normalizeRepository(repositoryUrl(entry))
-        const source = path.join(root, "source", name)
-        const dest = worktreePath(root, task, name)
-        if (fs.existsSync(source) && fs.existsSync(dest)) {
-            present.push(name)
-        }
-    }
-    present.sort()
+    // The participants that can actually be reported: every tasks/<task>/<name>
+    // folder (bare or aliased) whose repo is registered AND cloned, in stable
+    // sorted folder order (matches status/ship; a repo's aliases cluster
+    // together, which IS the group-by-repo grouping the report wants). The
+    // source/<repo> path is shared by a repo's participants.
+    const participants = taskParticipants(config, root, task)
+    const sourceByName = new Map(participants.map((p) => [p.name, p.source]))
+    const present = participants.map((p) => p.name)
 
     const scope = note?.repos ?? []
     const { inScope, strays } = partitionScope(present, scope)
@@ -101,9 +94,8 @@ export const taskFootprint = async (
     let base = ""
     const repos: FootprintRepo[] = []
     for (const name of targets) {
-        const source = path.join(root, "source", name)
         const dest = worktreePath(root, task, name)
-        // This repo's branch (adopted/--branch name, else task/<task>).
+        // This participant's branch (adopted/--branch, else its default).
         const branch = branchFor(task, name, branches)
         if (!present.includes(name)) {
             repos.push({
@@ -114,9 +106,11 @@ export const taskFootprint = async (
             })
             continue
         }
-        const repo = git(source)
+        // Source is the shared source/<repo> clone (present, by the filter
+        // above); several participants of one repo all read it.
+        const repo = git(sourceByName.get(name) as string)
 
-        // The comparison base: the persisted per-repo base (an adopted
+        // The comparison base: the persisted per-participant base (an adopted
         // branch's PR base) when recorded, else the same ref sync rebases onto
         // by default — origin's default branch, resolved from the local
         // origin/HEAD symref (e.g. origin/main).

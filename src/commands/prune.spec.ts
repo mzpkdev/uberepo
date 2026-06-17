@@ -556,4 +556,122 @@ describe("prune command", () => {
             })
         })
     })
+
+    describe("aliased participants (multiple branches per repo)", () => {
+        // Open an aliased worktree on branch task/<task>@<alias>, off main.
+        const openAliased = async (
+            name: string,
+            task: string,
+            alias: string
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                `task/${task}@${alias}`,
+                wt,
+                "main"
+            )
+            return wt
+        }
+
+        // Commit one file on an aliased participant's worktree (so its branch
+        // has work of its own), without disturbing any sibling worktree.
+        const commitAliased = async (
+            name: string,
+            task: string,
+            alias: string
+        ): Promise<void> => {
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            const file = `${alias}.txt`
+            await fsp.writeFile(path.join(wt, file), "landed\n")
+            await sh(wt, "add", file)
+            await sh(wt, "commit", "-m", `${alias}: work`)
+        }
+
+        // Land every named aliased branch into origin/main so each reads as
+        // merged, via ONE detached scratch worktree (source/<repo> itself holds
+        // main, so the scratch is detached, merges each branch in, and pushes
+        // the combined main once).
+        const landAll = async (
+            name: string,
+            task: string,
+            aliases: string[]
+        ): Promise<void> => {
+            const source = path.join(root, "source", name)
+            const scratch = path.join(root, "_merge", name)
+            await fsp.mkdir(path.dirname(scratch), { recursive: true })
+            await sh(source, "worktree", "add", "--detach", scratch, "main")
+            for (const alias of aliases) {
+                await sh(scratch, "merge", "--no-edit", `task/${task}@${alias}`)
+            }
+            // Publish the combined history as main upstream.
+            await sh(scratch, "push", "origin", "HEAD:main")
+            await sh(source, "worktree", "remove", "--force", scratch)
+            await sh(source, "fetch", "origin")
+            // Advance the source's LOCAL main too, so `git branch -d` (which
+            // checks ancestry against HEAD/main, not origin/main) sees each
+            // landed branch as fully merged. The source holds main checked out,
+            // so fast-forward it to the freshly fetched origin/main.
+            await sh(source, "merge", "--ff-only", "origin/main")
+        }
+
+        const aliasedBranchExists = async (
+            name: string,
+            branch: string
+        ): Promise<boolean> => {
+            try {
+                await sh(
+                    path.join(root, "source", name),
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    `refs/heads/${branch}`
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        it("prunes a task with several participants of one repo, removing every worktree + branch", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            await openAliased("autopilot", "alpha", "bug-fix")
+            await openAliased("autopilot", "alpha", "add-feature")
+            await commitAliased("autopilot", "alpha", "bug-fix")
+            await commitAliased("autopilot", "alpha", "add-feature")
+            await landAll("autopilot", "alpha", ["bug-fix", "add-feature"])
+            await writeScope("alpha", [
+                "autopilot@bug-fix",
+                "autopilot@add-feature"
+            ])
+
+            const json = await captureJson<PruneJson>(async () => {
+                await prune.run({ force: true })
+            })
+
+            expect(json.tasks).toEqual([{ task: "alpha", status: "pruned" }])
+            // Both participant worktrees + their branches are gone...
+            expect(fs.existsSync(taskDir("alpha", "autopilot@bug-fix"))).toBe(
+                false
+            )
+            expect(
+                fs.existsSync(taskDir("alpha", "autopilot@add-feature"))
+            ).toBe(false)
+            expect(
+                await aliasedBranchExists("autopilot", "task/alpha@bug-fix")
+            ).toBe(false)
+            expect(
+                await aliasedBranchExists("autopilot", "task/alpha@add-feature")
+            ).toBe(false)
+            // ...but the SHARED source clone survives.
+            expect(fs.existsSync(path.join(root, "source", "autopilot"))).toBe(
+                true
+            )
+        })
+    })
 })

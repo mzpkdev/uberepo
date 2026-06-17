@@ -8,6 +8,7 @@ import {
     branchFor,
     openTasks,
     partitionScope,
+    sourceName,
     type Task,
     worktreePath
 } from "@/tasks"
@@ -37,19 +38,19 @@ type PruneTask = {
     reason?: string
 }
 
-// Map a task's IN-SCOPE flat repo names to their source repositories + worktree
-// paths. A repo only participates when it is registered in the config AND cloned
-// (source/<name>); open tasks are derived from those same source registries, so
-// this resolves every in-scope repo a task's worktrees live in. Worktrees
-// outside the task's declared scope are NOT targets — prune leaves drift to the
-// caller to warn about, never removing a stray as a side effect.
+// Map a task's IN-SCOPE PARTICIPANTS (bare or aliased folders) to their source
+// repositories + worktree paths. A participant only participates when its repo
+// is registered in the config AND cloned (source/<repo>); open tasks are derived
+// from those same source registries. A repo may back SEVERAL participants — each
+// is its own Target (own branch/worktree), all sharing the one source/<repo>.
+// Worktrees outside the task's declared scope are NOT targets — prune leaves
+// drift to the caller to warn about, never removing a stray as a side effect.
 const targetsOf = async (task: Task): Promise<Target[]> => {
     const config = await Config.read()
     const root = await Config.root()
-    const byName = new Map<string, string>()
+    const registered = new Set<string>()
     for (const entry of config.repositories) {
-        const { name } = normalizeRepository(repositoryUrl(entry))
-        byName.set(name, path.join(root, "source", name))
+        registered.add(normalizeRepository(repositoryUrl(entry)).name)
     }
     const branches = task.note?.branches
     const { inScope } = partitionScope(
@@ -58,8 +59,9 @@ const targetsOf = async (task: Task): Promise<Target[]> => {
     )
     const targets: Target[] = []
     for (const name of inScope) {
-        const source = byName.get(name)
-        if (source) {
+        const repoName = sourceName(name)
+        const source = path.join(root, "source", repoName)
+        if (registered.has(repoName)) {
             targets.push({
                 name,
                 repo: git(source),

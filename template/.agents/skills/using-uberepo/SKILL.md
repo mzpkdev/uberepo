@@ -42,23 +42,26 @@ across them at once and switch tasks by switching directories — not `git check
    Re-read before reporting state. `--json` is a global flag on **every**
    command — pass it to any command for a single stable JSON object describing
    its outcome.
-2. **Work the lifecycle** (one task = one `task/<task>` branch across every repo):
+2. **Work the lifecycle** (one task = one branch per participant — `task/<task>` per
+   repo, or `task/<task>@<alias>` for an extra branch in the same repo):
    - `uberepo open <task>` — worktree + `task/<task>` branch in every cloned repo.
      `--from <ref>` chooses a base; `--goal "<text>"` sets the task note's goal;
      `--repos <name>...` is ADDITIVE — it scopes a brand-new task to those repos
      and only ever GROWS scope on re-open, never narrows it (an unscoped "all
      repos" task can't be narrowed — it stays unscoped, and naming `--repos` just
      clones+opens any named repo not already present). A named repo not yet cloned
-     is cloned on demand first; an unscoped open never clones on its own.
-     Idempotent.
+     is cloned on demand first; an unscoped open never clones on its own. An entry is
+     `repo` or `repo@alias` — the alias form opens another participant (its own worktree
+     + `task/<task>@<alias>` branch) in the same repo. Idempotent.
    - Edit in `tasks/<task>/<name>/`. **Commit and push per repo yourself** —
      uberepo does NOT commit or push. Follow each repo's own AGENTS.md/README.
    - `uberepo sync <task>` — rebase each worktree onto its fresh default branch.
      Refuses a dirty worktree; stops on conflict and leaves that repo mid-rebase.
      `--check` forecasts all that first, per repo (fetch only — no rebase, no
      hooks), so run it when you want to see the conflicts before hitting them.
-   - `uberepo ship <task>` — push each repo's branch and open a **draft** PR per
-     repo. Needs the GitHub CLI (`gh`) unless `--no-pr`. `--title`/`--body`
+   - `uberepo ship <task>` — push each participant's branch and open a **draft** PR
+     per branch (a repo with several participants gets several, grouped under it).
+     Needs the GitHub CLI (`gh`) unless `--no-pr`. `--title`/`--body`
      override; otherwise title = goal's first line, body = the repo's `.github` PR
      template. Re-run to fill gaps: it skips repos with nothing to ship and leaves
      an existing PR untouched (push refreshes it).
@@ -74,7 +77,7 @@ across them at once and switch tasks by switching directories — not `git check
      when the human asks, not by default.
    - **Carry (optional):** if `uberepo.json` has `carry` glob patterns
      (one array for every repo, or an object keyed by repo name), `open` copies the matching untracked
-     local files (`.env`, certs) from `source/<name>` into each fresh worktree
+     local files (`.env`, certs) from `source/<repo>` into each fresh worktree
      before its post-open hook, and `sync` re-copies missing ones. Existing
      worktree files are never overwritten. `close` warns when a carried file
      was edited in the task — those edits are lost with the worktree, so copy

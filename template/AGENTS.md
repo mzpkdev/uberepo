@@ -2,15 +2,21 @@
 
 Several git repos managed together via the `uberepo` CLI. Each *task* gets its own
 worktree in every repo — work across them at once, switch tasks by switching dirs,
-never by hand. First move: `uberepo status` + `uberepo sources`.
+never by hand. (A repo can carry more than one branch in a task via a `repo@alias`
+participant — see Layout.) First move: `uberepo status` + `uberepo sources`.
 
 ## Layout
 
     <workspace>/
     ├── uberepo.json          # the registered repositories
-    ├── source/<name>/            # canonical clone — read-only, don't work here
+    ├── source/<repo>/            # canonical clone — read-only, don't work here
     ├── tasks/<task>/<name>/      # per-task worktree, on branch task/<task> — work here
     └── tasks/<task>/ubertask.yml # task handoff note — keep it current
+
+`<name>` is the participant: a bare repo (`web`, branch `task/<task>`) or a
+`repo@alias` token (`web@auth`, branch `task/<task>@auth`) when a repo carries
+several branches in one task. The folder is flat one level either way, and all of
+a repo's participants share its one `source/<repo>` clone.
 
 ## Rules
 

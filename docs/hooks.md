@@ -60,15 +60,27 @@ A hook inherits the full parent environment plus these variables:
 | --- | --- |
 | `UBEREPO_EVENT` | the event name |
 | `UBEREPO_TASK` | the task name (empty string for the clone events) |
-| `UBEREPO_REPO` | the repo's flat name, as in `source/<name>` |
+| `UBEREPO_REPO` | the participant the event is about — the bare repo (`api`), or the `repo@alias` token when the repo carries an aliased branch in this task ([multi-branch](#a-repo-with-several-branches-in-one-task)) |
 | `UBEREPO_REPO_PATH` | absolute path of the directory the event is about (usually also the cwd; see the table) |
-| `UBEREPO_REPO_URL` | the repo's registered clone URL |
-| `UBEREPO_BRANCH` | the repo's task branch — `task/<task>` by default, or the adopted / `--branch` name when one was set (empty string for the clone events) |
+| `UBEREPO_REPO_URL` | the repo's registered clone URL (resolved from the bare repo, so all of a repo's aliased participants share it) |
+| `UBEREPO_BRANCH` | the participant's task branch — `task/<task>` by default, `task/<task>@<alias>` for an aliased participant, or the adopted / `--branch` name when one was set (empty string for the clone events) |
 | `UBEREPO_WORKSPACE` | absolute path of the workspace root |
 | `UBEREPO_PR_URL` | the PR's URL in `post-ship` once one is created or found; empty everywhere else, including under `--no-pr` |
 
 The task-scoped variables are empty strings rather than unset, so a script can
 read them without guarding.
+
+### A repo with several branches in one task
+
+A task can carry more than one branch in the *same* repo — two PRs out of `api`,
+say — by giving each an alias with `@`: `uberepo open my-task --repos api@auth
+api@cache`. Each `repo@alias` participant is its own worktree
+(`tasks/<task>/api@auth`, flat — one level), on its own branch
+(`task/<task>@auth`), and the hook fires once per participant. For those hooks
+`UBEREPO_REPO` is the full `api@auth` token and `UBEREPO_BRANCH` is
+`task/<task>@auth`, while `UBEREPO_REPO_URL` (and the `source/api` clone they all
+branch from) still resolves from the bare repo. A bare `api` with no alias is
+unchanged: `UBEREPO_REPO=api`, `UBEREPO_BRANCH=task/<task>`.
 
 ## Execution
 

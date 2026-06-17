@@ -5,7 +5,9 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { promisify } from "node:util"
 import { effect, terminal } from "cmdore"
+import { vi } from "vitest"
 import type { UberepoConfig } from "@/config"
+import git, { Repository } from "@/git"
 import { parseBranchSpecs } from "@/open-plan"
 import { type OpenStepCtx, openRepoWorktree } from "@/open-steps"
 
@@ -180,6 +182,118 @@ describe("openRepoWorktree — effect()-wrapped dry-run vs real run", () => {
         // The worktree is checked out on task/alpha.
         const branch = await sh(dest, "rev-parse", "--abbrev-ref", "HEAD")
         expect(branch).toBe("task/alpha")
+    })
+
+    it("aliased participant: folder is the token, branch is task/<task>@<alias>", async () => {
+        await makeRepo("autopilot")
+        const dest = path.join(root, "tasks", "alpha", "autopilot@bug-fix")
+
+        const result = await quiet(() =>
+            openRepoWorktree(
+                "autopilot@bug-fix",
+                ctx({
+                    config: { repositories: [url("autopilot")] },
+                    urlByName: new Map([["autopilot", url("autopilot")]])
+                })
+            )
+        )
+
+        // The participant outcome keys on the token; the worktree folder IS the
+        // token; the branch carries the alias as its leaf (joined with @).
+        expect(result.repo).toEqual({
+            name: "autopilot@bug-fix",
+            status: "created"
+        })
+        expect(fs.existsSync(dest)).toBe(true)
+        expect(await sh(dest, "rev-parse", "--abbrev-ref", "HEAD")).toBe(
+            "task/alpha@bug-fix"
+        )
+        // A plain aliased create records no base; the note write decides whether
+        // to persist it (it differs from task/alpha, so the shell will).
+        expect(result.branch).toEqual({
+            name: "task/alpha@bug-fix",
+            adopted: false
+        })
+    })
+
+    it("two same-repo participants share ONE source clone and land on distinct branches/folders", async () => {
+        // The repo is registered+uncloned; the on-demand clone must run ONCE
+        // across both participants. clonedRepos (shared via ctx) enforces it.
+        await sh(
+            root,
+            "init",
+            "--bare",
+            path.join(root, "_remote", "autopilot.git")
+        )
+        // Build a real upstream so the clone has something to fetch.
+        const seed = path.join(root, "_seed", "autopilot")
+        await fsp.mkdir(seed, { recursive: true })
+        await sh(seed, "init")
+        await sh(seed, "config", "user.email", "t@e.com")
+        await sh(seed, "config", "user.name", "T")
+        await fsp.writeFile(path.join(seed, "README.md"), "autopilot\n")
+        await sh(seed, "add", "README.md")
+        await sh(seed, "commit", "-m", "init")
+        const bare = path.join(root, "_remote", "autopilot.git")
+        await sh(seed, "push", "--mirror", bare)
+        const head = await sh(seed, "symbolic-ref", "--short", "HEAD")
+        await sh(bare, "symbolic-ref", "HEAD", `refs/heads/${head}`)
+
+        // Spy git.clone to clone from the local bare (no network), counting calls.
+        const calls: string[] = []
+        const spy = vi
+            .spyOn(git, "clone")
+            .mockImplementation(async (cloneUrl: string, dest: string) => {
+                calls.push(cloneUrl)
+                await exec("git", ["clone", bare, dest])
+                return new Repository(dest)
+            })
+
+        const shared = ctx({
+            config: { repositories: [url("autopilot")] },
+            urlByName: new Map([["autopilot", url("autopilot")]]),
+            clonedRepos: new Set<string>()
+        })
+
+        try {
+            const bugFix = await quiet(() =>
+                openRepoWorktree("autopilot@bug-fix", shared)
+            )
+            const addFeat = await quiet(() =>
+                openRepoWorktree("autopilot@add-feature", shared)
+            )
+
+            // ONE clone for the two participants.
+            expect(calls).toEqual([url("autopilot")])
+            // The first reports the clone; the second finds the clone present.
+            expect(bugFix.clone).toEqual({
+                name: "autopilot",
+                status: "cloned"
+            })
+            expect(addFeat.clone).toBeUndefined()
+
+            // Distinct folders, distinct branches, ONE source clone.
+            for (const [alias, branch] of [
+                ["bug-fix", "task/alpha@bug-fix"],
+                ["add-feature", "task/alpha@add-feature"]
+            ]) {
+                const dest = path.join(
+                    root,
+                    "tasks",
+                    "alpha",
+                    `autopilot@${alias}`
+                )
+                expect(fs.existsSync(dest)).toBe(true)
+                expect(
+                    await sh(dest, "rev-parse", "--abbrev-ref", "HEAD")
+                ).toBe(branch)
+            }
+            expect(fs.existsSync(path.join(root, "source", "autopilot"))).toBe(
+                true
+            )
+        } finally {
+            spy.mockRestore()
+        }
     })
 
     it("real run: every repeated --branch spec is honored per repo (adopt + create)", async () => {

@@ -3,12 +3,7 @@ import * as os from "node:os"
 import * as path from "node:path"
 import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
-import {
-    Config,
-    type RepositoryEntry,
-    repositoryUrl,
-    TASKS_DIR
-} from "@/config"
+import { Config, repositoryUrl, TASKS_DIR } from "@/config"
 import {
     currentGh,
     type Gh,
@@ -28,7 +23,13 @@ import { noHooks } from "@/options/no-hooks"
 import { noPr } from "@/options/no-pr"
 import { repos } from "@/options/repos"
 import { title } from "@/options/title"
-import { baseFor, branchFor, UBERTASK_FILENAME, worktreePath } from "@/tasks"
+import {
+    baseFor,
+    branchFor,
+    taskParticipants,
+    UBERTASK_FILENAME,
+    worktreePath
+} from "@/tasks"
 import * as ubertask from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
@@ -56,12 +57,14 @@ type ShipRepo = {
     error?: string
 }
 
-// A repo that passed pre-flight (clean, ahead of base) and is ready to push:
-// its flat name, source repo, worktree, the branch to push (adopted/--branch,
-// else task/<task>), the gh-facing base branch, and the mutable outcome it
-// writes its result into.
+// A participant that passed pre-flight (clean, ahead of base) and is ready to
+// push: its flat participant name (`repo` or `repo@alias`), the bare repo it
+// belongs to (for the hooks' UBEREPO_REPO_URL), source clone, worktree, the
+// branch to push (adopted/--branch, else its default), the gh-facing base
+// branch, and the mutable outcome it writes its result into.
 type Pending = {
     name: string
+    repo: string
     source: string
     dest: string
     branch: string
@@ -155,10 +158,17 @@ export default defineCommand({
         // first line, else the task name (never titleless).
         const resolvedTitle = argv.title ?? goalTitle(note?.goal) ?? argv.task
 
-        // Universe = the task's declared scope when non-empty, else every repo
-        // that currently has a worktree for this task. Then ∩ the --repos filter.
+        // Universe = the task's declared scope when non-empty, else every
+        // PARTICIPANT (bare or aliased) that currently has a worktree for this
+        // task. Then ∩ the --repos filter. A repo's several aliased participants
+        // are each their own universe entry (each ships its own branch + PR);
+        // they SHARE the source clone, base discovery, and PR template via their
+        // common repo. participantByName maps a participant back to its
+        // source/<repo> + repo for the pre-flight and push loops.
         const scope = note?.repos ?? []
-        const present = presentRepos(config, root, argv.task)
+        const participants = taskParticipants(config, root, argv.task)
+        const participantByName = new Map(participants.map((p) => [p.name, p]))
+        const present = participants.map((p) => p.name)
         const universe =
             scope.length > 0
                 ? scope.filter((n) => present.includes(n))
@@ -201,22 +211,42 @@ export default defineCommand({
             return
         }
 
-        // ── Pre-flight per repo: decide skip vs ship. A dirty worktree or a
-        // branch not ahead of base is a per-repo skip (never aborts the run).
+        // ── Pre-flight per PARTICIPANT: decide skip vs ship. A dirty worktree
+        // or a branch not ahead of base is a per-participant skip (never aborts
+        // the run). Same-repo participants share source/<repo> and so share base
+        // discovery (remoteDefault) and the PR template (read from the worktree,
+        // but the template lives in the repo) — they are NOT two independent
+        // repos. `participant` carries the source/<repo> + repo for the name.
         const results: ShipRepo[] = []
         const pending: Pending[] = []
         for (const name of targets) {
-            const source = path.join(root, "source", name)
+            const participant = participantByName.get(name)
+            // A scope name (note repos:) with no worktree on disk: skip it like
+            // a missing participant rather than touching the wrong source dir.
+            if (!participant) {
+                results.push({
+                    name,
+                    branch: branchFor(argv.task, name, note?.branches),
+                    pushed: false,
+                    status: "skipped",
+                    reason: "no worktree"
+                })
+                terminal.log(`${name}: no worktree — skipping`)
+                continue
+            }
+            const source = participant.source
             const dest = worktreePath(root, argv.task, name)
             const repo = git(source)
             const wt = repo.worktree(dest)
-            // This repo's branch to push (adopted/--branch, else task/<task>).
+            // This participant's branch to push (adopted/--branch, else its
+            // default: task/<task> bare, task/<task>@<alias> aliased).
             const branch = branchFor(argv.task, name, note?.branches)
 
-            // Resolve this repo's base: --base wins; then the persisted per-repo
-            // base (an adopted branch's PR base — so "ahead" counts against the
-            // PR's real target, not a flattened remoteDefault); else its remote
-            // default. No base at all → can't compute "ahead", skip.
+            // Resolve this participant's base: --base wins; then the persisted
+            // per-participant base (an adopted branch's PR base — so "ahead"
+            // counts against the PR's real target, not a flattened
+            // remoteDefault); else its repo's remote default. No base at all →
+            // can't compute "ahead", skip.
             const baseRef =
                 argv.base ??
                 baseFor(name, note?.branches) ??
@@ -272,6 +302,7 @@ export default defineCommand({
             results.push(out)
             pending.push({
                 name,
+                repo: participant.repo,
                 source,
                 dest,
                 branch,
@@ -297,7 +328,7 @@ export default defineCommand({
                 repo: {
                     name: item.name,
                     path: item.dest,
-                    url: urlByName.get(item.name) ?? "",
+                    url: urlByName.get(item.repo) ?? "",
                     branch: item.branch
                 },
                 noHooks: argv["no-hooks"]
@@ -386,7 +417,7 @@ export default defineCommand({
                     repo: {
                         name: item.name,
                         path: item.dest,
-                        url: urlByName.get(item.name) ?? "",
+                        url: urlByName.get(item.repo) ?? "",
                         branch: item.branch
                     },
                     noHooks: argv["no-hooks"]
@@ -446,27 +477,6 @@ const fail = (out: ShipRepo, message: string): void => {
     out.status = "failed"
     out.error = message
     terminal.error(`${out.name}: ${message}`)
-}
-
-// The repos that currently have a worktree for `task`: registered AND cloned
-// (source/<name> exists) AND the task worktree dir exists. Stable sorted order
-// (matches status). Used as the universe when the task declares no scope, and to
-// intersect a declared scope down to what is actually open.
-const presentRepos = (
-    config: { repositories: RepositoryEntry[] },
-    root: string,
-    task: string
-): string[] => {
-    const names: string[] = []
-    for (const entry of config.repositories) {
-        const { name } = normalizeRepository(repositoryUrl(entry))
-        const source = path.join(root, "source", name)
-        const dest = worktreePath(root, task, name)
-        if (fs.existsSync(source) && fs.existsSync(dest)) {
-            names.push(name)
-        }
-    }
-    return names.sort()
 }
 
 // The number of commits on `branch` not reachable from `baseRef`

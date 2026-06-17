@@ -1,19 +1,68 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import { Config, repositoryUrl, TASKS_DIR } from "@/config"
+import {
+    Config,
+    type RepositoryEntry,
+    repositoryUrl,
+    TASKS_DIR
+} from "@/config"
 import git from "@/git"
 import type { Ubertask } from "@/ubertask"
 import * as ubertask from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
-// The on-disk location of a repo's worktree for a task:
-// <root>/tasks/<task>/<name>, where <name> is the flat folder a repo clones
-// to under source/. open/close build their target paths from this.
+// The on-disk location of a participant's worktree for a task:
+// <root>/tasks/<task>/<name>, where <name> is the FLAT folder name — a bare
+// repo (`web`) or an aliased participant (`autopilot@bug-fix`). Folders are one
+// level deep, bare and aliased alike: the typed token IS the folder name. A repo
+// may now contribute SEVERAL participants to one task (two PRs in one repo), each
+// its own folder; the shared source clone they branch from is source/<repo> (see
+// sourceName). open/close build their target paths from this.
 export const worktreePath = (
     root: string,
     task: string,
     name: string
 ): string => path.join(root, TASKS_DIR, task, name)
+
+// The separator that nests an alias under a repo, used IDENTICALLY in CLI args,
+// the note's `repos:` list, the branch name, and the folder name. `@` on purpose:
+// `:` is illegal in Windows filenames, and `/` collides in git's ref store (a
+// bare `task/T` and a nested `task/T/x` can't coexist — "cannot lock ref"),
+// whereas `task/T@x` sits beside `task/T` cleanly.
+export const ALIAS_SEPARATOR = "@"
+
+// A task PARTICIPANT split into its parts: the registered repo it clones from
+// (`source/<repo>`) and the optional alias that distinguishes one of a repo's
+// several branches/worktrees in this task. A bare token (`web`) has no alias; an
+// aliased token (`autopilot@bug-fix`) splits on the FIRST `@`. The repo segment
+// is what every source/<…> and registration lookup keys on; the alias is what the
+// branch leaf and (with the repo) the folder name carry.
+export type Participant = {
+    repo: string
+    alias?: string
+}
+
+// Split a participant token into { repo, alias? }. The alias is everything after
+// the first `@` (name validation forbids `@` inside either part at open time, so
+// a well-formed token has at most one). A token with no `@`, or a trailing `@`
+// with nothing after it, is a bare repo with no alias.
+export const splitParticipant = (token: string): Participant => {
+    const at = token.indexOf(ALIAS_SEPARATOR)
+    if (at === -1) {
+        return { repo: token }
+    }
+    const repo = token.slice(0, at)
+    const alias = token.slice(at + 1)
+    return alias === "" ? { repo } : { repo, alias }
+}
+
+// The registered repo a participant token clones from — its `source/<repo>`
+// segment. THE seam that keeps aliases task-local: every source-clone lookup,
+// every config/registration match, and carry all route a participant through
+// here, so `autopilot@bug-fix` and `autopilot@add-feature` share the one
+// source/autopilot clone and never appear in the manifest.
+export const sourceName = (token: string): string =>
+    splitParticipant(token).repo
 
 // The on-disk root of a task: <root>/tasks/<task> — the dir holding the durable
 // note (ubertask.yml) and, as siblings, the per-repo worktree dirs. close
@@ -22,44 +71,66 @@ export const worktreePath = (
 export const taskPath = (root: string, task: string): string =>
     path.join(root, TASKS_DIR, task)
 
-// The branch convention a task's worktrees live on, by default. A repo can
-// override this (adopt a pre-existing branch) — see branchFor.
+// The branch convention a task's BARE worktrees live on, by default. An aliased
+// participant defaults to taskBranch@<alias> instead — see participantBranch. A
+// participant can also override either (adopt a pre-existing branch) — see
+// branchFor.
 export const taskBranch = (task: string): string => `task/${task}`
 
-// The branch one repo's worktree lives on for a task: the per-repo branch
-// recorded in the note's `branches:` map when present, else the `task/<task>`
-// default. This is THE resolver every command routes its branch-name
-// derivation through, so a repo that adopted a pre-existing branch (recorded
-// at open time) is operated on under that branch everywhere — push, rebase,
-// merged-check, diff — while a repo with no record keeps the original
-// convention unchanged. `branches` is the parsed note's map ({} for a legacy
-// or unscoped note), so a task that never adopted resolves exactly as today.
+// The DEFAULT branch a participant's worktree lives on, before any note
+// override: `task/<task>` for a bare participant (`web`), and
+// `task/<task>@<alias>` for an aliased one (`autopilot@bug-fix`). The alias is
+// the branch leaf — joined with `@`, the same separator the folder uses and the
+// one git tolerates beside a bare `task/<task>` (a `/` leaf would collide in the
+// ref store). This is the fallback branchFor lands on when the note records no
+// override for the participant.
+export const participantBranch = (task: string, name: string): string => {
+    const { alias } = splitParticipant(name)
+    return alias === undefined
+        ? taskBranch(task)
+        : `${taskBranch(task)}${ALIAS_SEPARATOR}${alias}`
+}
+
+// The branch one PARTICIPANT's worktree lives on for a task: the override
+// recorded in the note's `branches:` map (keyed by the FULL participant token,
+// so a repo's several aliased branches stay distinct) when present, else the
+// participant's default (`task/<task>` bare, `task/<task>@<alias>` aliased).
+// This is THE resolver every command routes its branch-name derivation through,
+// so a participant that adopted a pre-existing branch (recorded at open time) is
+// operated on under that branch everywhere — push, rebase, merged-check, diff —
+// while one with no record keeps the convention. `branches` is the parsed note's
+// map ({} for a legacy or unscoped note), so a task that never adopted resolves
+// to the participant default exactly as before for bare repos.
 export const branchFor = (
     task: string,
-    repo: string,
+    name: string,
     branches?: Record<string, { name: string }>
-): string => branches?.[repo]?.name ?? taskBranch(task)
+): string => branches?.[name]?.name ?? participantBranch(task, name)
 
-// The persisted per-repo base for a task, or undefined when none is recorded.
-// Only an ADOPTED branch whose PR base was discovered carries a base; a created
-// branch records none. Threaded into the EXISTING `override ?? remoteDefault()`
-// chain at every base consumer as `argv.from ?? baseFor(...) ?? remoteDefault()`
-// — so a legacy task (no `branches:`) yields undefined and falls straight
-// through to remoteDefault, the original behaviour. NOT a resolver of its own:
-// it returns the stored value, the caller keeps its remoteDefault() tail.
+// The persisted per-participant base for a task, or undefined when none is
+// recorded. Only an ADOPTED branch whose PR base was discovered carries a base;
+// a created branch records none. Keyed by the FULL participant token (so each of
+// a repo's aliased branches can carry its own base). Threaded into the EXISTING
+// `override ?? remoteDefault()` chain at every base consumer as
+// `argv.from ?? baseFor(...) ?? remoteDefault()` — so a legacy task (no
+// `branches:`) yields undefined and falls straight through to remoteDefault, the
+// original behaviour. NOT a resolver of its own: it returns the stored value,
+// the caller keeps its remoteDefault() tail.
 export const baseFor = (
-    repo: string,
+    name: string,
     branches?: Record<string, { base?: string }>
-): string | undefined => branches?.[repo]?.base
+): string | undefined => branches?.[name]?.base
 
 // The per-task durable note: <root>/tasks/<task>/ubertask.yml — a sibling of the
 // per-repo worktree dirs (NOT inside any worktree, NOT one-per-repo). Holds the
 // "why" git can't regenerate; open seeds it, status surfaces its freshness.
 export const UBERTASK_FILENAME = "ubertask.yml"
 
-// One source repository's participation in a task: which flat name it clones
-// to, the branch its worktree is on (if any), and whether that worktree has
-// uncommitted changes.
+// One PARTICIPANT's slice of a task: its flat folder `name` (`repo` or
+// `repo@alias` — a repo may contribute several), the branch its worktree is on
+// (if any), and whether that worktree has uncommitted changes. Derived from
+// `git worktree list`, so `name` is the on-disk folder, the participant identity
+// every per-task command keys on.
 export type TaskRepo = {
     name: string
     branch?: string
@@ -142,6 +213,60 @@ export const partitionScope = (
         }
     }
     return { inScope, strays }
+}
+
+// One participant of a task that is present on disk: its folder name (`repo` or
+// `repo@alias`, the identity every per-task command keys on), the bare repo it
+// clones from, that repo's source/<repo> path, and its registered URL.
+export type TaskParticipant = {
+    name: string
+    repo: string
+    source: string
+    url: string
+}
+
+// The participants a task currently HAS on disk: every tasks/<task>/<name> subdir
+// whose backing repo (sourceName(name)) is registered AND cloned. This is the
+// participant-aware replacement for the old "iterate registered repos, keep the
+// ones with a worktree" loop — a repo can now back SEVERAL participant folders in
+// one task, so the truth is the folders, not the manifest. Returned in stable
+// sorted folder order (matches status/diff). A folder whose repo isn't registered
+// or isn't cloned is skipped here (close/ship/sync never act on it); the note's
+// scope partition still flags it as a stray when it's outside scope. Synchronous
+// fs (existsSync/readdirSync), mirroring the loops it replaces.
+export const taskParticipants = (
+    config: { repositories: RepositoryEntry[] },
+    root: string,
+    task: string
+): TaskParticipant[] => {
+    // Registered repo → URL, the manifest's unit. Several participants may share
+    // one repo, so this is keyed by the bare name.
+    const urlByRepo = new Map<string, string>()
+    for (const entry of config.repositories) {
+        const url = repositoryUrl(entry)
+        urlByRepo.set(normalizeRepository(url).name, url)
+    }
+    let folders: string[] = []
+    try {
+        folders = fs
+            .readdirSync(taskPath(root, task), { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name)
+    } catch {
+        // No task dir → no participants.
+        return []
+    }
+    const participants: TaskParticipant[] = []
+    for (const name of folders.sort()) {
+        const repo = sourceName(name)
+        const url = urlByRepo.get(repo)
+        const source = path.join(root, "source", repo)
+        if (url === undefined || !fs.existsSync(source)) {
+            continue
+        }
+        participants.push({ name, repo, source, url })
+    }
+    return participants
 }
 
 // Parse a worktree path of the form <root>/tasks/<task>/<name> into its task

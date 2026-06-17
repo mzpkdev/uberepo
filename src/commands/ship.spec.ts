@@ -911,4 +911,119 @@ describe("ship command", () => {
             expect(line).toBe("[]")
         })
     })
+
+    describe("aliased participants (multiple branches per repo)", () => {
+        // Add an aliased worktree for `task` to source repo `name`, on branch
+        // task/<task>@<alias> — the on-disk shape open produces for a participant.
+        const openAliased = async (
+            name: string,
+            task: string,
+            alias: string
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                `task/${task}@${alias}`,
+                wt,
+                "main"
+            )
+            return wt
+        }
+
+        it("ships two branches of ONE repo as two participants, grouped under the repo", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            const bugFix = await openAliased("autopilot", "alpha", "bug-fix")
+            const addFeat = await openAliased(
+                "autopilot",
+                "alpha",
+                "add-feature"
+            )
+            await commitWork(bugFix, "fix.txt")
+            await commitWork(addFeat, "feat.txt")
+            // The note's scope is the two participants.
+            await writeNote(
+                "alpha",
+                "goal: |\n  two PRs\n\nrepos:\n  - autopilot@bug-fix\n  - autopilot@add-feature\n"
+            )
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const json = await captureJson<ShipJson>(async () => {
+                await ship.run(argv())
+            })
+
+            // One shipped entry per participant (each its own branch + PR), in
+            // the note's declared scope order (a repo's participants stay
+            // together — the universe is the scope, not two independent repos).
+            expect(json.repos.map((r) => [r.name, r.branch, r.status])).toEqual(
+                [
+                    ["autopilot@bug-fix", "task/alpha@bug-fix", "shipped"],
+                    [
+                        "autopilot@add-feature",
+                        "task/alpha@add-feature",
+                        "shipped"
+                    ]
+                ]
+            )
+            // Both aliased branches were really pushed to the ONE upstream
+            // (there is no bare task/alpha — each participant has its own ref).
+            expect(
+                await sh(
+                    path.join(root, "upstream", "autopilot.git"),
+                    "rev-parse",
+                    "task/alpha@bug-fix"
+                )
+            ).toBeTruthy()
+            expect(
+                await sh(
+                    path.join(root, "upstream", "autopilot.git"),
+                    "rev-parse",
+                    "task/alpha@add-feature"
+                )
+            ).toBeTruthy()
+            // One PR per branch (two creates against the same repo).
+            const creates = gh.calls.filter(
+                (c) => `${c.args[0]} ${c.args[1]}` === "pr create"
+            )
+            expect(creates).toHaveLength(2)
+        })
+
+        it("--repos can narrow a multi-branch ship to ONE of the repo's participants", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            const bugFix = await openAliased("autopilot", "alpha", "bug-fix")
+            const addFeat = await openAliased(
+                "autopilot",
+                "alpha",
+                "add-feature"
+            )
+            await commitWork(bugFix, "fix.txt")
+            await commitWork(addFeat, "feat.txt")
+            await writeNote(
+                "alpha",
+                "goal: |\n  g\n\nrepos:\n  - autopilot@bug-fix\n  - autopilot@add-feature\n"
+            )
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const json = await captureJson<ShipJson>(async () => {
+                await ship.run(argv({ repos: ["autopilot@bug-fix"] }))
+            })
+
+            // Only the named participant shipped; the other was untouched.
+            expect(json.repos.map((r) => r.name)).toEqual(["autopilot@bug-fix"])
+            await expect(
+                sh(
+                    path.join(root, "upstream", "autopilot.git"),
+                    "rev-parse",
+                    "task/alpha@add-feature"
+                )
+            ).rejects.toThrow()
+        })
+    })
 })

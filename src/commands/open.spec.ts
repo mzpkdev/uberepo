@@ -1967,4 +1967,202 @@ describe("open command", () => {
             expect(await branchAt("web", "alpha")).toBe("shared/feature")
         })
     })
+
+    describe("aliased participants (multiple branches per repo)", () => {
+        const readBranches = async (
+            task: string
+        ): Promise<Record<string, unknown>> => {
+            const file = path.join(root, "tasks", task, UBERTASK_FILENAME)
+            return parse(await fsp.readFile(file, "utf8")).branches
+        }
+
+        it("opens TWO worktrees of one repo as distinct aliased folders + branches", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+
+            const logs = await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: undefined,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["autopilot@bug-fix", "autopilot@add-feature"]
+                })
+            })
+
+            // Two flat folders under the one task, each its own branch.
+            for (const [alias, branch] of [
+                ["bug-fix", "task/alpha@bug-fix"],
+                ["add-feature", "task/alpha@add-feature"]
+            ]) {
+                const dir = path.join(
+                    root,
+                    "tasks",
+                    "alpha",
+                    `autopilot@${alias}`
+                )
+                expect(fs.existsSync(dir)).toBe(true)
+                expect(await branchAt(`autopilot@${alias}`, "alpha")).toBe(
+                    branch
+                )
+            }
+            // ONE shared source clone (never per-participant).
+            expect(fs.existsSync(path.join(root, "source", "autopilot"))).toBe(
+                true
+            )
+            // The note's scope is the participant list (repo-qualified).
+            expect(await scopeOf("alpha")).toEqual([
+                "autopilot@bug-fix",
+                "autopilot@add-feature"
+            ])
+            // Plain aliased participants on their default record NO branches
+            // entry — branchFor reconstructs task/<task>@<alias> from the token.
+            expect(await readBranches("alpha")).toEqual({})
+            expect(logs.join("\n")).toContain(
+                "Opened task alpha in 2 repositories"
+            )
+        })
+
+        it("mixes a bare repo and an aliased participant of the SAME repo in one task", async () => {
+            await makeSource("autopilot")
+            await makeSource("web")
+            await register(["autopilot", "web"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: undefined,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["autopilot", "autopilot@hotfix", "web"]
+                })
+            })
+
+            // Bare autopilot → task/alpha; aliased → task/alpha@hotfix; both
+            // share source/autopilot. web is its own bare participant.
+            expect(await branchAt("autopilot", "alpha")).toBe("task/alpha")
+            expect(await branchAt("autopilot@hotfix", "alpha")).toBe(
+                "task/alpha@hotfix"
+            )
+            expect(await branchAt("web", "alpha")).toBe("task/alpha")
+            expect(await scopeOf("alpha")).toEqual([
+                "autopilot",
+                "autopilot@hotfix",
+                "web"
+            ])
+        })
+
+        it("--branch overrides one participant's branch, keyed by the full token", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            // A pre-existing branch the bug-fix participant should ADOPT.
+            await sh(
+                path.join(root, "source", "autopilot"),
+                "branch",
+                "fix/login",
+                "main"
+            )
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: ["autopilot@bug-fix=fix/login"],
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["autopilot@bug-fix", "autopilot@add-feature"]
+                })
+            })
+
+            // bug-fix adopted the pre-existing branch; add-feature stayed on its
+            // aliased default. The branches map keys by the full participant.
+            expect(await branchAt("autopilot@bug-fix", "alpha")).toBe(
+                "fix/login"
+            )
+            expect(await branchAt("autopilot@add-feature", "alpha")).toBe(
+                "task/alpha@add-feature"
+            )
+            expect(await readBranches("alpha")).toEqual({
+                "autopilot@bug-fix": { name: "fix/login", adopted: true }
+            })
+        })
+
+        it("is idempotent per participant: re-opening skips an existing aliased worktree, opens a new one", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+
+            await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: undefined,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["autopilot@bug-fix"]
+                })
+            })
+
+            // Re-open ADDING a second alias: bug-fix is skipped (already open),
+            // add-feature is created. Scope unions the new participant in.
+            const logs = await captureLogs(async () => {
+                await open.run({
+                    "no-hooks": false,
+                    branch: undefined,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["autopilot@add-feature"]
+                })
+            })
+
+            const joined = logs.join("\n")
+            expect(joined).toContain(
+                "autopilot@bug-fix — worktree already open"
+            )
+            expect(joined).toContain("Opened task alpha in 1 repository")
+            expect(await branchAt("autopilot@add-feature", "alpha")).toBe(
+                "task/alpha@add-feature"
+            )
+            expect(await scopeOf("alpha")).toEqual([
+                "autopilot@bug-fix",
+                "autopilot@add-feature"
+            ])
+        })
+
+        it("rejects an invalid alias (glob char) before creating anything", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+
+            await expect(
+                open.run({
+                    "no-hooks": false,
+                    branch: undefined,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["autopilot@bad*alias"]
+                })
+            ).rejects.toThrow("glob characters")
+            expect(fs.existsSync(path.join(root, "tasks", "alpha"))).toBe(false)
+        })
+
+        it("rejects two participants differing only in case before creating anything", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+
+            await expect(
+                open.run({
+                    "no-hooks": false,
+                    branch: undefined,
+                    task: "alpha",
+                    from: undefined,
+                    goal: undefined,
+                    repos: ["autopilot@Fix", "autopilot@fix"]
+                })
+            ).rejects.toThrow("differ only in case")
+            expect(fs.existsSync(path.join(root, "tasks", "alpha"))).toBe(false)
+        })
+    })
 })

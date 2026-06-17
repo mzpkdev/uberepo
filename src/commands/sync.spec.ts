@@ -1318,4 +1318,74 @@ describe("sync command", () => {
             expect(json.repos).toEqual([{ name: "api", status: "current" }])
         })
     })
+
+    describe("aliased participants (multiple branches per repo)", () => {
+        // Open an aliased worktree on branch task/<task>@<alias>, off main.
+        const openAliased = async (
+            name: string,
+            task: string,
+            alias: string
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                `task/${task}@${alias}`,
+                wt,
+                "main"
+            )
+            return wt
+        }
+
+        it("rebases EACH participant of one repo onto the advanced default, sharing the source", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            const bugFix = await openAliased("autopilot", "alpha", "bug-fix")
+            const addFeat = await openAliased(
+                "autopilot",
+                "alpha",
+                "add-feature"
+            )
+            // Each participant gets its own local commit so a real replay runs.
+            for (const wt of [bugFix, addFeat]) {
+                await fsp.writeFile(path.join(wt, "work.txt"), `${wt}\n`)
+                await sh(wt, "add", "work.txt")
+                await sh(wt, "commit", "-m", "participant work")
+            }
+            await writeScope("alpha", [
+                "autopilot@bug-fix",
+                "autopilot@add-feature"
+            ])
+            // Others advanced the SHARED upstream's main.
+            const tip = await advanceUpstream("autopilot", "up.txt", "x\n")
+
+            const json = await captureJson<{
+                repos: { name: string; status: string }[]
+            }>(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: false
+                })
+            })
+
+            // Both participants rebased (per-participant), each branch now
+            // carrying the advanced upstream tip.
+            expect(json.repos).toEqual([
+                { name: "autopilot@add-feature", status: "rebased" },
+                { name: "autopilot@bug-fix", status: "rebased" }
+            ])
+            const source = path.join(root, "source", "autopilot")
+            for (const branch of [
+                "task/alpha@bug-fix",
+                "task/alpha@add-feature"
+            ]) {
+                await sh(source, "merge-base", "--is-ancestor", tip, branch)
+            }
+        })
+    })
 })

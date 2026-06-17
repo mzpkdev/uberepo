@@ -40,6 +40,29 @@ my-workspace/
 ```
 **Tasks are first-class. Repos are just the participants.**
 
+### More than one branch in a repo
+
+Usually a repo joins a task once, on one branch. When you need two branches in
+the *same* repo for one task — two stacked PRs, a fix and a follow-up — give each
+an alias with `@`:
+```bash
+uberepo open big-rename --repos web@strings web@logos api
+```
+`web` now contributes two participants, each its own worktree and branch, while
+`api` stays a plain single-branch participant:
+```text
+tasks/big-rename/
+├── ubertask.yml
+├── web@strings/      # branch task/big-rename@strings
+├── web@logos/        # branch task/big-rename@logos
+└── api/              # branch task/big-rename
+```
+The `repo@alias` token is the same everywhere — the `--repos` argument, the
+branch leaf (`task/big-rename@strings`), and the worktree folder (flat, one level
+deep). Both branches push from the one shared `source/web` clone; `ship` opens a
+PR per branch, `close` tears down both worktrees and keeps the clone. A bare
+`web` (no `@`) is unchanged.
+
 ## Why not a monorepo?
 
 Sometimes you can't merge the repos — separate owners, separate CI, separate deploy cadences — so überepo works with the ones you're stuck with, each keeping its own conventions and PR flow.
@@ -138,7 +161,7 @@ decisions:
 
 | Command | What it does |
 | --- | --- |
-| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`, `--branch`; repos scoped via `--repos` clone on demand. `--branch <repo>=<name>` (or a bare `--branch <name>` for all repos) **adopts** an existing branch instead of creating `task/<task>` — `close`/`prune` then keep that branch. |
+| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`, `--branch`; repos scoped via `--repos` clone on demand. A `--repos repo@alias` token gives one repo a second branch in the task ([below](#more-than-one-branch-in-a-repo)). `--branch <repo>=<name>` (or a bare `--branch <name>` for all repos) **adopts** an existing branch instead of creating `task/<task>` — `close`/`prune` then keep that branch. |
 | `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
 | `uberepo diff <task>` | Show the task's footprint: commits ahead + diffstat per repo. |
 | `uberepo context <task>` | Everything to resume a task — note, per-repo state, PR state — as a paste-ready markdown brief. |

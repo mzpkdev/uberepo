@@ -22,13 +22,17 @@ export type UbertaskItem = {
     repo?: string
 }
 
-// One repo's recorded branch in a task: the branch its worktree lives on
-// (`name`), whether `open` ADOPTED a pre-existing branch (`adopted`) rather
-// than creating `task/<task>`, and — for an adopted branch whose PR base was
-// discovered — the persisted `base` ref the consumers rebase/diff/ship
+// One PARTICIPANT's recorded branch in a task: the branch its worktree lives on
+// (`name`), whether `open` ADOPTED a pre-existing branch (`adopted`) rather than
+// creating the participant default, and — for an adopted branch whose PR base
+// was discovered — the persisted `base` ref the consumers rebase/diff/ship
 // against (omitted when none was discovered, so callers fall back to
-// remoteDefault). A created branch is `{ name, adopted: false }`, no base.
-// Keyed by the flat source/<name> repo name in the `branches:` map.
+// remoteDefault). A created branch is `{ name, adopted: false }`, no base. Keyed
+// in the `branches:` map by the FULL participant token (`repo` or `repo@alias`),
+// so a repo's several aliased branches each carry their own record. Only an
+// OVERRIDE is stored: a participant on its plain default (task/<task> bare,
+// task/<task>@<alias> aliased) records nothing — branchFor reconstructs the
+// default from the token.
 export type UbertaskBranch = {
     name: string
     adopted: boolean
@@ -38,19 +42,23 @@ export type UbertaskBranch = {
 // The parsed note. Every field is always present so callers never branch on
 // undefined: `goal` is "" when unset, the lists are [] when empty. `goal` is a
 // single logical line (the documented one-line `|` block); the lists preserve
-// document order. `repos` is the task's declared scope — the flat source/<name>
-// names a task OWNS, so commands act only on those; [] means unscoped, i.e. all
-// cloned repos (the original behaviour). This is the TASK's scope and is
-// DISTINCT from a `decisions`/`blockers` item's per-item `repo` attribution.
+// document order. `repos` is the task's declared scope — the PARTICIPANT tokens
+// a task OWNS (`web`, or `autopilot@bug-fix` for an aliased participant; a repo
+// may appear several times under different aliases), so commands act only on
+// those; [] means unscoped, i.e. all cloned repos as bare participants (the
+// original behaviour). This is the TASK's scope and is DISTINCT from a
+// `decisions`/`blockers` item's per-item `repo` attribution.
 export type Ubertask = {
     goal: string
     repos: string[]
     tickets: string[]
     decisions: UbertaskItem[]
     blockers: UbertaskItem[]
-    // The per-repo recorded branches (adopt-or-create), keyed by flat repo
-    // name. {} when the task records none — a legacy note (no `branches:`) or
-    // a freshly-seeded one — so callers fall back to taskBranch()/remoteDefault.
+    // The per-participant recorded branch OVERRIDES (adopt / non-default name),
+    // keyed by the full participant token. {} when the task records none — a
+    // legacy note (no `branches:`), a freshly-seeded one, or a task whose
+    // participants are all on their plain default — so callers fall back to
+    // branchFor()'s participant default / remoteDefault.
     branches: Record<string, UbertaskBranch>
 }
 
@@ -195,7 +203,10 @@ const readBranches = (
             continue
         }
         const indent = line.length - line.trimStart().length
-        const header = /^(\s*)([A-Za-z0-9._-]+):\s*$/.exec(line)
+        // The key may be a bare repo (`api`) or an aliased participant
+        // (`api@bug-fix`) — `@` is part of the participant token, so it is an
+        // allowed header character here just as in the folder/branch name.
+        const header = /^(\s*)([A-Za-z0-9._@-]+):\s*$/.exec(line)
         // A top-level (column-0) line, or a non-header line, ends the map.
         if (indent === 0 || !header) {
             break

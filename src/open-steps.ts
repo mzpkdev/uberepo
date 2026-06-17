@@ -13,7 +13,7 @@ import {
     resolveBranchMode
 } from "@/open-plan"
 import { type CloneRepo, cloneSource } from "@/sources"
-import { taskBranch, worktreePath } from "@/tasks"
+import { participantBranch, sourceName, worktreePath } from "@/tasks"
 import type { UbertaskBranch } from "@/ubertask"
 import { normalizeRepository } from "@/url"
 
@@ -53,12 +53,17 @@ export const collectSources = (
 }
 
 // Everything openRepoWorktree closes over from the command's run(): the
-// workspace config and root, the task, the resolved `--branch` spec (per-repo
-// branch names, adopt-or-create resolved per repo inside the step), the
-// fallback base for a CREATED branch (--from, else HEAD — adopted branches
-// discover their base from the PR), the name→URL map (for the on-demand clone
-// and the hooks' UBEREPO_REPO_URL), and the --no-hooks flag. The per-iteration
-// locals (source/dest/relative/branch) are derived inside the step.
+// workspace config and root, the task, the resolved `--branch` spec
+// (per-participant branch names, adopt-or-create resolved per participant inside
+// the step), the fallback base for a CREATED branch (--from, else HEAD — adopted
+// branches discover their base from the PR), the repo→URL map keyed by the bare
+// repo name (for the on-demand clone and the hooks' UBEREPO_REPO_URL), the
+// --no-hooks flag, and `clonedRepos`: the set of bare repo names already
+// clone-attempted THIS run. The step consults + updates it so a repo backing
+// several participants is cloned ONCE — the second participant sharing it never
+// re-clones (faithful even under --dry-run, where the clone never lands on
+// disk). The per-iteration locals (source/dest/relative/branch) are derived
+// inside the step from the participant token.
 export type OpenStepCtx = {
     config: UberepoConfig
     root: string
@@ -67,6 +72,7 @@ export type OpenStepCtx = {
     base: string
     urlByName: Map<string, string>
     noHooks?: boolean
+    clonedRepos?: Set<string>
 }
 
 // One repo's open outcome as a VALUE. The caller pushes `repo` into its repos
@@ -99,18 +105,25 @@ export const openRepoWorktree = async (
     name: string,
     ctx: OpenStepCtx
 ): Promise<OpenStepResult> => {
-    const source = path.join(ctx.root, "source", name)
+    // `name` is the participant token (`repo` or `repo@alias`). The worktree
+    // folder is the token; the source clone is the bare repo, SHARED by every
+    // participant of that repo.
+    const repo = sourceName(name)
+    const source = path.join(ctx.root, "source", repo)
     const dest = worktreePath(ctx.root, ctx.task, name)
     const relative = path.join(TASKS_DIR, ctx.task, name)
     const hooks: HookResult[] = []
-    // On-demand clone: a target with no clone yet is cloned FIRST, as the same
-    // per-repo lifecycle op `uberepo clone` runs (pre-clone gate → git clone →
-    // post-clone, identical hook cwd/env contract), then opened below like any
-    // cloned repo. A target is uncloned only when it was explicitly asked for —
-    // a scoped name, or a --repos name on an unscoped task; an unscoped open
-    // never adds an uncloned target on its own, so it still never clones
-    // implicitly.
-    if (!fs.existsSync(source)) {
+    // On-demand clone: a target whose repo has no clone yet AND that this run has
+    // not already cloned is cloned FIRST, as the same per-repo lifecycle op
+    // `uberepo clone` runs (pre-clone gate → git clone → post-clone, identical
+    // hook cwd/env contract), then opened below like any cloned repo. A target is
+    // uncloned only when it was explicitly asked for — a scoped name, or a
+    // --repos name on an unscoped task; an unscoped open never adds an uncloned
+    // target on its own, so it still never clones implicitly. clonedRepos makes a
+    // repo backing SEVERAL participants clone once: the first participant clones
+    // and records the repo; the rest fall through to the open below.
+    if (!fs.existsSync(source) && !ctx.clonedRepos?.has(repo)) {
+        ctx.clonedRepos?.add(repo)
         // Under --dry-run the clone (git clone + its pre/post-clone hooks) is a
         // mutation, so it stays inside effect() and never runs — but the PLAN
         // must still report it. effect() resolves undefined when disabled, so
@@ -121,8 +134,8 @@ export const openRepoWorktree = async (
             cloneSource({
                 config: ctx.config,
                 root: ctx.root,
-                name,
-                url: ctx.urlByName.get(name) ?? "",
+                name: repo,
+                url: ctx.urlByName.get(repo) ?? "",
                 noHooks: ctx.noHooks
             })
         )) as Awaited<ReturnType<typeof cloneSource>> | undefined
@@ -131,13 +144,15 @@ export const openRepoWorktree = async (
             // disk) and plan the worktree against the would-be clone. A repo
             // with no clone on disk can't be probed for an existing branch, so
             // openCloned plans a fresh CREATE on the resolved branch name — the
-            // faithful common-case outcome for a brand-new clone.
+            // faithful common-case outcome for a brand-new clone. The clone entry
+            // is keyed by the bare repo (the clone unit), the worktree by the
+            // participant.
             return await openCloned(name, ctx, {
                 source,
                 dest,
                 relative,
                 hooks,
-                clone: { name, status: "cloned" }
+                clone: { name: repo, status: "cloned" }
             })
         }
         for (const hook of outcome.hooks) {
@@ -189,6 +204,11 @@ const openCloned = async (
     }
 ): Promise<OpenStepResult> => {
     const { source, dest, relative, hooks, clone } = extra
+    // The bare repo backing this participant — the source/URL identity, shared
+    // by every participant of the repo. Hooks still report under the participant
+    // `name` (so two same-repo participants stay distinct in the JSON), but the
+    // clone URL is keyed by the repo.
+    const repoName = sourceName(name)
     // Idempotent: an existing worktree dir is left untouched. This is also the
     // recovery path — re-running open skips the done repos and resumes after a
     // mid-run failure.
@@ -202,16 +222,21 @@ const openCloned = async (
         }
     }
     const repo = git(source)
-    // The branch this repo's worktree will live on: the --branch spec's
-    // per-repo / all-repos name, else the task/<task> default. Then decide
-    // adopt-or-create from whether that branch already exists locally or only
-    // on origin — the one genuinely new git mechanic, kept in the pure planner.
-    // These are READS (git rev-parse), so they always run, INCLUDING under
-    // --dry-run — the plan needs the real adopt-or-create decision. The one
-    // exception is the dry-run on-demand-clone path: `source` does not exist on
-    // disk (the clone is the skipped mutation), so there is nothing to probe and
-    // the faithful plan is a fresh CREATE on the resolved name.
-    const branch = branchNameFor(ctx.branchSpec, name, taskBranch(ctx.task))
+    // The branch this participant's worktree will live on: the --branch spec's
+    // per-participant / all-repos name, else the participant default
+    // (task/<task> bare, task/<task>@<alias> aliased). Then decide adopt-or-create
+    // from whether that branch already exists locally or only on origin — the one
+    // genuinely new git mechanic, kept in the pure planner. These are READS (git
+    // rev-parse), so they always run, INCLUDING under --dry-run — the plan needs
+    // the real adopt-or-create decision. The one exception is the dry-run
+    // on-demand-clone path: `source` does not exist on disk (the clone is the
+    // skipped mutation), so there is nothing to probe and the faithful plan is a
+    // fresh CREATE on the resolved name.
+    const branch = branchNameFor(
+        ctx.branchSpec,
+        name,
+        participantBranch(ctx.task, name)
+    )
     const mode = fs.existsSync(source)
         ? resolveBranchMode({
               local: await repo.branchExists(branch),
@@ -234,7 +259,7 @@ const openCloned = async (
             repo: {
                 name,
                 path: dest,
-                url: ctx.urlByName.get(name) ?? "",
+                url: ctx.urlByName.get(repoName) ?? "",
                 branch
             },
             noHooks: ctx.noHooks
@@ -308,14 +333,17 @@ const openCloned = async (
     let carry: CarryEntry | undefined
     // Carry the configured untracked local files (.env and friends) from the
     // source clone into the fresh worktree BEFORE post-open fires, so a hook
-    // like `npm ci && db:migrate` finds them in place. Copying files is a
+    // like `npm ci && db:migrate` finds them in place. Pattern lookup is by the
+    // bare repo (carry config is per-repo), so every participant of a repo
+    // carries the same files; the carry ENTRY is tagged with the participant so
+    // two same-repo participants stay distinct in the JSON. Copying files is a
     // mutation (and reads the worktree, which only exists after a real create),
     // so it is wrapped in effect(): a dry-run copies nothing and records no
     // carry entry.
     const carried = (await effect(() =>
         runCarry({
             config: ctx.config,
-            name,
+            name: repoName,
             source,
             worktree: dest
         })
@@ -336,7 +364,7 @@ const openCloned = async (
             repo: {
                 name,
                 path: dest,
-                url: ctx.urlByName.get(name) ?? "",
+                url: ctx.urlByName.get(repoName) ?? "",
                 branch
             },
             noHooks: ctx.noHooks

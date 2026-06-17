@@ -843,4 +843,128 @@ describe("close command", () => {
             ])
         })
     })
+
+    describe("aliased participants (multiple branches per repo)", () => {
+        // Open an aliased worktree on branch task/<task>@<alias>, branched off
+        // main (so its tip is merged into origin/main and close won't refuse).
+        const openAliased = async (
+            name: string,
+            task: string,
+            alias: string
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                `task/${task}@${alias}`,
+                wt,
+                "main"
+            )
+            return wt
+        }
+
+        const aliasedBranchExists = (
+            name: string,
+            branch: string
+        ): Promise<boolean> => namedBranchExists(name, branch)
+
+        it("removes ALL of a repo's participant worktrees + branches, keeping the source clone", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            await openAliased("autopilot", "alpha", "bug-fix")
+            await openAliased("autopilot", "alpha", "add-feature")
+            await writeScope("alpha", [
+                "autopilot@bug-fix",
+                "autopilot@add-feature"
+            ])
+
+            const json = await captureJson<{
+                repos: { name: string; status: string }[]
+            }>(async () => {
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
+            })
+
+            // Both participant worktrees torn down (sorted folder order)...
+            expect(json.repos).toEqual([
+                { name: "autopilot@add-feature", status: "closed" },
+                { name: "autopilot@bug-fix", status: "closed" }
+            ])
+            expect(fs.existsSync(taskDir("alpha", "autopilot@bug-fix"))).toBe(
+                false
+            )
+            expect(
+                fs.existsSync(taskDir("alpha", "autopilot@add-feature"))
+            ).toBe(false)
+            // ...both per-participant branches deleted...
+            expect(
+                await aliasedBranchExists("autopilot", "task/alpha@bug-fix")
+            ).toBe(false)
+            expect(
+                await aliasedBranchExists("autopilot", "task/alpha@add-feature")
+            ).toBe(false)
+            // ...but the SHARED source clone survives, and the task dir is gone.
+            expect(fs.existsSync(path.join(root, "source", "autopilot"))).toBe(
+                true
+            )
+            expect(fs.existsSync(taskRoot("alpha"))).toBe(false)
+        })
+
+        it("an adopted aliased participant keeps its branch; a default sibling deletes its own", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            // bug-fix adopts a pre-existing branch; add-feature is a default.
+            await sh(
+                path.join(root, "source", "autopilot"),
+                "branch",
+                "fix/login",
+                "main"
+            )
+            const bugFix = path.join(
+                root,
+                "tasks",
+                "alpha",
+                "autopilot@bug-fix"
+            )
+            await sh(
+                path.join(root, "source", "autopilot"),
+                "worktree",
+                "add",
+                bugFix,
+                "fix/login"
+            )
+            await openAliased("autopilot", "alpha", "add-feature")
+            // Note: bug-fix adopted (keyed by the full token), add-feature default.
+            await fsp.writeFile(
+                notePath("alpha"),
+                "goal: |\n  g\n\n" +
+                    "repos:\n  - autopilot@bug-fix\n  - autopilot@add-feature\n\n" +
+                    "branches:\n  autopilot@bug-fix:\n    name: fix/login\n    adopted: true\n"
+            )
+
+            await captureOutput(async () => {
+                await close.run({
+                    task: "alpha",
+                    force: false,
+                    "no-hooks": false
+                })
+            })
+
+            // The adopted branch is KEPT (never ours to drop); the default
+            // sibling's branch is deleted. Both worktrees are gone.
+            expect(await aliasedBranchExists("autopilot", "fix/login")).toBe(
+                true
+            )
+            expect(
+                await aliasedBranchExists("autopilot", "task/alpha@add-feature")
+            ).toBe(false)
+            expect(fs.existsSync(taskRoot("alpha"))).toBe(false)
+        })
+    })
 })
