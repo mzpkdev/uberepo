@@ -67,7 +67,8 @@ across them at once and switch tasks by switching directories — not `git check
      first non-zero exit. Exits non-zero if any repo's command did. No hooks/carry/
      fetch; `--json` for per-repo `exitCode`/`stdout`/`stderr`.
    - `uberepo sync <task>` — rebase each worktree onto its fresh default branch.
-     Refuses a dirty worktree; stops on conflict and leaves that repo mid-rebase.
+     Refuses a dirty worktree; a conflict leaves that one repo mid-rebase but the
+     rest of the run carries on — resolve and re-run to finish it.
      `--check` forecasts all that first, per repo (fetch only — no rebase, no
      hooks), so run it when you want to see the conflicts before hitting them.
    - `uberepo ship <task>` — push each participant's branch and open a **draft** PR

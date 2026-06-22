@@ -184,11 +184,12 @@ Fetches and rebases each worktree onto its repo's fresh default branch.
   conflicts (or is otherwise not reached), its descendants are pruned with
   `"parent not synced"` — fix the parent, then re-run to carry the stack the
   rest of the way.
-- **Stops on conflict**: leaves that repo mid-rebase. Resolve it in that
-  worktree (`git add` the resolved files, `git rebase --continue`, or
-  `git rebase --abort` to back out), then re-run `uberepo sync <task>` to carry
-  on with the remaining repos — including any stacked descendants that were
-  pruned as `"parent not synced"` while the conflict stood.
+- **A conflict isolates — it doesn't halt the run**: the conflicting repo is
+  left mid-rebase and its stacked descendants are pruned (`"parent not synced"`),
+  but every other repo and independent root in the same run still rebases.
+  Resolve it in that worktree (`git add` the resolved files, `git rebase
+  --continue`, or `git rebase --abort` to back out), then re-run `uberepo sync
+  <task>` to finish the conflicted branch and carry its stack the rest of the way.
 - `--check` — a conflict **forecast**: fetch (the one ref update), then predict
   each repo's rebase with `git merge-tree` — no rebase, no hooks, no carry, no
   worktree mutation. Per repo: `current` (the target is already contained —
