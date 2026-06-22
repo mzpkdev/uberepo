@@ -140,6 +140,61 @@ export const stackParent = (
     return base !== undefined && scope.includes(base) ? base : undefined
 }
 
+// Order a set of present participants so every stack PARENT comes before its
+// children — the order sync's restack must walk (a child can only rebase onto a
+// parent that already moved). Each participant has ≤1 stack parent (its base),
+// so the edges form a FOREST; this is a stable topological sort of it. Within
+// the constraint the INPUT order is preserved (the caller passes stable sorted
+// folder order), so non-stacked participants keep today's order and a root sits
+// exactly where it did, with its subtree threaded in right after it. `present`
+// is the participants on disk and in scope; `branches`/`scope` come from the
+// note. Pure — no git, no fs. Cross-repo edges can't occur (validation forbids
+// them), but the sort is per the full set and harmless if a base points outside
+// `present` (treated as a root). A cycle is impossible by the same validation;
+// were one ever present, the guard below still emits every node exactly once
+// rather than looping.
+export const stackOrder = (
+    present: string[],
+    branches: Record<string, { base?: string }> | undefined,
+    scope: string[]
+): string[] => {
+    const inScope = new Set(present)
+    // parent token (in-scope sibling) for each present child, else undefined.
+    const parentOf = new Map<string, string | undefined>()
+    for (const name of present) {
+        const parent = stackParent(name, branches, scope)
+        // A base naming a sibling that is NOT actually present (e.g. its
+        // worktree was closed) can't be a usable parent here — treat the node
+        // as a root so it still rebases against its remote target.
+        parentOf.set(
+            name,
+            parent !== undefined && inScope.has(parent) ? parent : undefined
+        )
+    }
+    const ordered: string[] = []
+    const emitted = new Set<string>()
+    // Emit a node after its parent chain. `seen` breaks any (validation-
+    // forbidden) cycle so a malformed note degrades to "emit once" not a hang.
+    const emit = (name: string, seen: Set<string>): void => {
+        if (emitted.has(name) || seen.has(name)) {
+            return
+        }
+        seen.add(name)
+        const parent = parentOf.get(name)
+        if (parent !== undefined) {
+            emit(parent, seen)
+        }
+        if (!emitted.has(name)) {
+            emitted.add(name)
+            ordered.push(name)
+        }
+    }
+    for (const name of present) {
+        emit(name, new Set<string>())
+    }
+    return ordered
+}
+
 // The per-task durable note: <root>/tasks/<task>/ubertask.yml — a sibling of the
 // per-repo worktree dirs (NOT inside any worktree, NOT one-per-repo). Holds the
 // "why" git can't regenerate; open seeds it, status surfaces its freshness.

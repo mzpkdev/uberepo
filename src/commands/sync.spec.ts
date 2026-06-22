@@ -413,8 +413,10 @@ describe("sync command", () => {
         expect(await reachable("web", "alpha", webTip)).toBe(false)
     })
 
-    it("conflict: stops at the first conflicting repo, leaving it mid-rebase, and skips the rest", async () => {
-        // "api" sorts before "web", so api is processed first.
+    it("Decision A: a conflicting repo is left mid-rebase, but an INDEPENDENT repo still rebases (no global stop)", async () => {
+        // "api" sorts before "web", so api is processed first. Under the old
+        // contract api's conflict halted the run and web was "not reached";
+        // Decision A prunes only api's (empty) subtree and continues to web.
         await makeSource("api")
         await makeSource("web")
         await register(["api", "web"])
@@ -428,37 +430,44 @@ describe("sync command", () => {
         await sh(apiWt, "add", "README.md")
         await sh(apiWt, "commit", "-m", "task edits readme")
 
-        // web would rebase cleanly (own file, advanced upstream) — but must be
-        // left untouched because api stops the run first.
+        // web is an independent root: own file + advanced upstream → it rebases
+        // cleanly even though api conflicted first.
         const webWt = path.join(root, "tasks", "alpha", "web")
         await fsp.writeFile(path.join(webWt, "work.txt"), "web work\n")
         await sh(webWt, "add", "work.txt")
         await sh(webWt, "commit", "-m", "web task work")
-        const webBefore = await branchSha("web", "alpha")
         const webTip = await advanceUpstream("web", "upstream.txt", "web\n")
 
-        const { logs } = await captureOutput(async () => {
-            await sync.run({
-                task: "alpha",
-                from: undefined,
-                "no-hooks": false,
-                check: false
-            })
-        })
+        const previousExit = process.exitCode
+        process.exitCode = undefined
+        let logs: string[]
+        try {
+            ;({ logs } = await captureOutput(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: false
+                })
+            }))
+            expect(process.exitCode).toBe(1)
+        } finally {
+            process.exitCode = previousExit
+        }
 
         const joined = logs.join("\n")
         // Message names the repo and its path, and offers resolve/abort.
         expect(joined).toContain("api: rebase conflict")
         expect(joined).toContain(apiWt)
         expect(joined).toContain("git rebase --abort")
-        // No success summary, and web was never synced.
-        expect(joined).not.toContain("web: synced")
-        expect(joined).not.toContain("Synced task")
-        // api is left mid-rebase (the stop signal for the user).
+        // The run reports the stop but did NOT skip web.
+        expect(joined).toContain("stopped on a conflict in api")
+        // web WAS synced (the per-forest independence Decision A buys).
+        expect(joined).toContain("web: synced")
+        // api is left mid-rebase (the resolve/abort signal for the user).
         expect(await rebaseInProgress(apiWt)).toBe(true)
-        // web is untouched: same branch tip, upstream NOT folded in.
-        expect(await branchSha("web", "alpha")).toBe(webBefore)
-        expect(await reachable("web", "alpha", webTip)).toBe(false)
+        // web took the advanced upstream — it was not held back by api.
+        expect(await reachable("web", "alpha", webTip)).toBe(true)
 
         // Clean up the in-progress rebase so afterEach can remove the tree.
         await sh(apiWt, "rebase", "--abort")
@@ -489,8 +498,12 @@ describe("sync command", () => {
         expect(joined).toContain(
             "api: cannot resolve origin's default branch — pass --from <ref>"
         )
-        expect(joined).not.toContain("synced")
-        expect(joined).not.toContain("Synced task")
+        // The repo is a per-repo skip (no flatten, nothing half-done): no
+        // "Syncing api"/"api: synced" line for it. With no resolvable target it
+        // contributes 0 to the synced count — the run summarises "in 0
+        // repositories" rather than the old global stop.
+        expect(joined).not.toContain("api: synced")
+        expect(joined).toContain("Synced task alpha in 0 repositories")
         // Nothing was rebased: branch tip unchanged, no rebase left running.
         expect(await branchSha("api", "alpha")).toBe(before)
         expect(await rebaseInProgress(wt)).toBe(false)
@@ -580,19 +593,21 @@ describe("sync command", () => {
                     check: false
                 })
             })
+            // Each root carries its own per-entry `base` (= the run-level onto)
+            // — Phase 3 added it so a stacked child can name its parent instead.
             expect(json).toEqual({
                 task: "alpha",
                 onto: "origin/main",
                 repos: [
-                    { name: "api", status: "rebased" },
-                    { name: "web", status: "rebased" }
+                    { name: "api", status: "rebased", base: "origin/main" },
+                    { name: "web", status: "rebased", base: "origin/main" }
                 ],
                 hooks: [],
                 carry: []
             })
         })
 
-        it("emits the conflicting repo as conflict and later repos as skipped/not reached", async () => {
+        it("Decision A: a conflict no longer halts an independent repo — it rebases; the conflict is reported", async () => {
             await makeSource("api")
             await makeSource("web")
             await register(["api", "web"])
@@ -603,30 +618,44 @@ describe("sync command", () => {
             await fsp.writeFile(path.join(apiWt, "README.md"), "from task\n")
             await sh(apiWt, "add", "README.md")
             await sh(apiWt, "commit", "-m", "task edits readme")
-            // web would rebase cleanly but must never be reached.
+            // web is an INDEPENDENT root that would rebase cleanly. Under the
+            // old global-stop it was "not reached"; under Decision A it rebases.
             await fsp.writeFile(path.join(webWt, "work.txt"), "web work\n")
             await sh(webWt, "add", "work.txt")
             await sh(webWt, "commit", "-m", "web task work")
-            await advanceUpstream("web", "u.txt", "web\n")
+            const webTip = await advanceUpstream("web", "u.txt", "web\n")
 
-            const json = await captureJson<SyncJson>(async () => {
-                await sync.run({
-                    task: "alpha",
-                    from: undefined,
-                    "no-hooks": false,
-                    check: false
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: SyncJson
+            try {
+                json = await captureJson<SyncJson>(async () => {
+                    await sync.run({
+                        task: "alpha",
+                        from: undefined,
+                        "no-hooks": false,
+                        check: false
+                    })
                 })
-            })
+                // A conflict anywhere still flips the exit code non-zero.
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // api conflicts and is reported; web — independent — still rebased.
             expect(json).toEqual({
                 task: "alpha",
                 onto: "origin/main",
                 repos: [
-                    { name: "api", status: "conflict" },
-                    { name: "web", status: "skipped", reason: "not reached" }
+                    { name: "api", status: "conflict", base: "origin/main" },
+                    { name: "web", status: "rebased", base: "origin/main" }
                 ],
                 hooks: [],
                 carry: []
             })
+            // web really took the advanced tip; api is left mid-rebase.
+            expect(await reachable("web", "alpha", webTip)).toBe(true)
+            expect(await rebaseInProgress(apiWt)).toBe(true)
             // Leave the tree clean so afterEach can remove the worktree.
             await sh(apiWt, "rebase", "--abort")
         })
@@ -682,7 +711,9 @@ describe("sync command", () => {
                 })
             })
             expect(json.onto).toBe("main")
-            expect(json.repos).toEqual([{ name: "api", status: "rebased" }])
+            expect(json.repos).toEqual([
+                { name: "api", status: "rebased", base: "main" }
+            ])
         })
 
         it("emits empty repos under --json when the task is not open", async () => {
@@ -766,7 +797,9 @@ describe("sync command", () => {
                 })
             })
             // Rebased, but the hook was suppressed.
-            expect(json.repos).toEqual([{ name: "api", status: "rebased" }])
+            expect(json.repos).toEqual([
+                { name: "api", status: "rebased", base: "origin/main" }
+            ])
             expect(json.hooks).toEqual([])
             expect(fs.existsSync(path.join(wt, "hooked"))).toBe(false)
         })
@@ -803,8 +836,8 @@ describe("sync command", () => {
             }
             // Both repos rebased (no rollback): api's new upstream is reachable.
             expect(json.repos).toEqual([
-                { name: "api", status: "rebased" },
-                { name: "web", status: "rebased" }
+                { name: "api", status: "rebased", base: "origin/main" },
+                { name: "web", status: "rebased", base: "origin/main" }
             ])
             expect(await reachable("api", "alpha", apiTip)).toBe(true)
             // The loop continued: web's hook ran after api's failure.
@@ -851,9 +884,10 @@ describe("sync command", () => {
                 {
                     name: "api",
                     status: "skipped",
-                    reason: "pre-sync hook failed"
+                    reason: "pre-sync hook failed",
+                    base: "origin/main"
                 },
-                { name: "web", status: "rebased" }
+                { name: "web", status: "rebased", base: "origin/main" }
             ])
             expect(json.hooks).toEqual([
                 { event: "pre-sync", repo: "api", exit: 1 },
@@ -924,7 +958,9 @@ describe("sync command", () => {
                 })
             })
 
-            expect(json.repos).toEqual([{ name: "api", status: "rebased" }])
+            expect(json.repos).toEqual([
+                { name: "api", status: "rebased", base: "origin/main" }
+            ])
             expect(await fsp.readFile(path.join(wt, ".env"), "utf8")).toBe(
                 "FROM_SOURCE\n"
             )
@@ -980,6 +1016,7 @@ describe("sync command", () => {
             status: string
             files?: string[]
             reason?: string
+            base?: string
         }[]
     }
 
@@ -1317,6 +1354,82 @@ describe("sync command", () => {
             const json = await runCheck("alpha")
             expect(json.repos).toEqual([{ name: "api", status: "current" }])
         })
+
+        it("forecasts a STACKED child against its parent's CURRENT tip (approximate), naming the parent as base", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            const source = path.join(root, "source", "autopilot")
+            // strings (root) with its own commit; logos (child) off strings,
+            // editing the SAME file strings will — a tip-level merge-tree
+            // against the parent's current tip forecasts a conflict.
+            const stringsWt = path.join(
+                root,
+                "tasks",
+                "alpha",
+                "autopilot@strings"
+            )
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                "task/alpha@strings",
+                stringsWt,
+                "main"
+            )
+            await fsp.writeFile(path.join(stringsWt, "shared.txt"), "strings\n")
+            await sh(stringsWt, "add", "shared.txt")
+            await sh(stringsWt, "commit", "-m", "strings work")
+            const logosWt = path.join(root, "tasks", "alpha", "autopilot@logos")
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                "task/alpha@logos",
+                logosWt,
+                "main"
+            )
+            // logos branched off MAIN (not strings) and edits shared.txt too, so
+            // its tip conflicts with strings' tip at shared.txt.
+            await fsp.writeFile(path.join(logosWt, "shared.txt"), "logos\n")
+            await sh(logosWt, "add", "shared.txt")
+            await sh(logosWt, "commit", "-m", "logos work")
+            await fsp.writeFile(
+                path.join(root, "tasks", "alpha", "ubertask.yml"),
+                [
+                    "goal: |",
+                    "  stacked",
+                    "",
+                    "repos:",
+                    "  - autopilot@strings",
+                    "  - autopilot@logos",
+                    "",
+                    "branches:",
+                    "  autopilot@logos:",
+                    "    name: task/alpha@logos",
+                    "    adopted: false",
+                    "    base: autopilot@strings",
+                    ""
+                ].join("\n")
+            )
+
+            const json = await runCheck("alpha")
+            // The root forecasts against origin/main (names the run onto) and is
+            // simply ahead of the quiet upstream → current; the child forecasts
+            // against its PARENT's branch (its own `base`), and the shared-file
+            // collision shows up as a likely conflict.
+            expect(json.onto).toBe("origin/main")
+            expect(json.repos).toEqual([
+                {
+                    name: "autopilot@logos",
+                    status: "conflicts",
+                    files: ["shared.txt"],
+                    base: "task/alpha@strings"
+                },
+                { name: "autopilot@strings", status: "current" }
+            ])
+        })
     })
 
     describe("aliased participants (multiple branches per repo)", () => {
@@ -1376,8 +1489,16 @@ describe("sync command", () => {
             // Both participants rebased (per-participant), each branch now
             // carrying the advanced upstream tip.
             expect(json.repos).toEqual([
-                { name: "autopilot@add-feature", status: "rebased" },
-                { name: "autopilot@bug-fix", status: "rebased" }
+                {
+                    name: "autopilot@add-feature",
+                    status: "rebased",
+                    base: "origin/main"
+                },
+                {
+                    name: "autopilot@bug-fix",
+                    status: "rebased",
+                    base: "origin/main"
+                }
             ])
             const source = path.join(root, "source", "autopilot")
             for (const branch of [
@@ -1388,51 +1509,166 @@ describe("sync command", () => {
             }
         })
 
-        it("never flattens a STACKED child onto main; a sibling root still rebases", async () => {
-            await makeSource("autopilot")
-            await register(["autopilot"])
-            // strings is a root; logos stacks on it (branched off the parent
-            // branch, with its own commit on top).
-            const stringsWt = await openAliased("autopilot", "alpha", "strings")
+        // ── Phase 3 stacked-PR auto-restack ───────────────────────────────────
+        // Build a `main ← P ← C` stack in `source/<repo>` for task `alpha`:
+        // root participant <root> with one commit, child participant <child>
+        // branched off the root's branch with its own commit, and a note
+        // declaring child.base = <repo>@<root>. Returns the two worktree paths
+        // and the source dir.
+        const openStack = async (
+            repo: string,
+            opts: { root: string; child: string; grandchild?: string }
+        ): Promise<{
+            source: string
+            rootWt: string
+            childWt: string
+            grandchildWt?: string
+        }> => {
+            const source = path.join(root, "source", repo)
+            const rootWt = await openAliased(repo, "alpha", opts.root)
             await fsp.writeFile(
-                path.join(stringsWt, "strings.txt"),
-                "strings\n"
+                path.join(rootWt, `${opts.root}.txt`),
+                `${opts.root}\n`
             )
-            await sh(stringsWt, "add", "strings.txt")
-            await sh(stringsWt, "commit", "-m", "strings work")
-            const source = path.join(root, "source", "autopilot")
-            const logosWt = path.join(root, "tasks", "alpha", "autopilot@logos")
+            await sh(rootWt, "add", `${opts.root}.txt`)
+            await sh(rootWt, "commit", "-m", `${opts.root} work`)
+
+            const childWt = path.join(
+                root,
+                "tasks",
+                "alpha",
+                `${repo}@${opts.child}`
+            )
             await sh(
                 source,
                 "worktree",
                 "add",
                 "-b",
-                "task/alpha@logos",
-                logosWt,
-                "task/alpha@strings"
+                `task/alpha@${opts.child}`,
+                childWt,
+                `task/alpha@${opts.root}`
             )
-            await fsp.writeFile(path.join(logosWt, "logos.txt"), "logos\n")
-            await sh(logosWt, "add", "logos.txt")
-            await sh(logosWt, "commit", "-m", "logos work")
-            // The note declares the sibling edge logos.base = autopilot@strings.
+            await fsp.writeFile(
+                path.join(childWt, `${opts.child}.txt`),
+                `${opts.child}\n`
+            )
+            await sh(childWt, "add", `${opts.child}.txt`)
+            await sh(childWt, "commit", "-m", `${opts.child} work`)
+
+            let grandchildWt: string | undefined
+            const lines = [
+                "goal: |",
+                "  stacked",
+                "",
+                "repos:",
+                `  - ${repo}@${opts.root}`,
+                `  - ${repo}@${opts.child}`
+            ]
+            const branches = [
+                "",
+                "branches:",
+                `  ${repo}@${opts.child}:`,
+                `    name: task/alpha@${opts.child}`,
+                "    adopted: false",
+                `    base: ${repo}@${opts.root}`
+            ]
+            if (opts.grandchild !== undefined) {
+                grandchildWt = path.join(
+                    root,
+                    "tasks",
+                    "alpha",
+                    `${repo}@${opts.grandchild}`
+                )
+                await sh(
+                    source,
+                    "worktree",
+                    "add",
+                    "-b",
+                    `task/alpha@${opts.grandchild}`,
+                    grandchildWt,
+                    `task/alpha@${opts.child}`
+                )
+                await fsp.writeFile(
+                    path.join(grandchildWt, `${opts.grandchild}.txt`),
+                    `${opts.grandchild}\n`
+                )
+                await sh(grandchildWt, "add", `${opts.grandchild}.txt`)
+                await sh(
+                    grandchildWt,
+                    "commit",
+                    "-m",
+                    `${opts.grandchild} work`
+                )
+                lines.push(`  - ${repo}@${opts.grandchild}`)
+                branches.push(
+                    `  ${repo}@${opts.grandchild}:`,
+                    `    name: task/alpha@${opts.grandchild}`,
+                    "    adopted: false",
+                    `    base: ${repo}@${opts.child}`
+                )
+            }
             await fsp.mkdir(path.join(root, "tasks", "alpha"), {
                 recursive: true
             })
             await fsp.writeFile(
                 path.join(root, "tasks", "alpha", "ubertask.yml"),
-                "goal: |\n  stacked\n\nrepos:\n  - autopilot@strings\n  - autopilot@logos\n\nbranches:\n  autopilot@logos:\n    name: task/alpha@logos\n    adopted: false\n    base: autopilot@strings\n"
+                `${[...lines, ...branches].join("\n")}\n`
             )
-            // The child's tip before sync — it must be UNCHANGED after.
-            const logosBefore = await sh(
-                source,
-                "rev-parse",
-                "task/alpha@logos"
+            return { source, rootWt, childWt, grandchildWt }
+        }
+
+        // The sha a named branch points at, in source/<repo>.
+        const sha = (repo: string, branch: string): Promise<string> =>
+            sh(path.join(root, "source", repo), "rev-parse", branch)
+
+        // The persisted restack fork-point ref for a child participant.
+        const restackRef = (child: string): string =>
+            `refs/uberepo/restack/alpha/autopilot@${child}`
+
+        // True when the restack ref for `child` currently exists.
+        const restackRefExists = async (child: string): Promise<boolean> => {
+            const source = path.join(root, "source", "autopilot")
+            try {
+                await sh(
+                    source,
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    restackRef(child)
+                )
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        // The subjects of a branch's commits, newest first (for asserting that a
+        // restacked child carries ONLY its own commit, not the parent's twice).
+        const subjects = async (
+            repo: string,
+            branch: string
+        ): Promise<string[]> => {
+            const out = await sh(
+                path.join(root, "source", repo),
+                "log",
+                "--format=%s",
+                branch
             )
+            return out.split("\n").filter((l) => l !== "")
+        }
+
+        it("happy path: P rebases onto fresh main and C restacks onto P's NEW tip with only its own commit", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            const { source } = await openStack("autopilot", {
+                root: "strings",
+                child: "logos"
+            })
             // Others advanced the shared upstream's main.
             const tip = await advanceUpstream("autopilot", "up.txt", "x\n")
 
             const json = await captureJson<{
-                repos: { name: string; status: string; reason?: string }[]
+                repos: { name: string; status: string; base?: string }[]
             }>(async () => {
                 await sync.run({
                     task: "alpha",
@@ -1442,32 +1678,21 @@ describe("sync command", () => {
                 })
             })
 
-            // The root rebased onto the advanced default; the stacked child was
-            // skipped with the restack-pending reason.
+            // Parent rebased onto origin/main; child restacked onto the PARENT's
+            // branch — topological order puts the parent (strings) first.
             expect(json.repos).toEqual([
                 {
-                    name: "autopilot@logos",
-                    status: "skipped",
-                    reason: "stacked (restack pending)"
+                    name: "autopilot@strings",
+                    status: "rebased",
+                    base: "origin/main"
                 },
-                { name: "autopilot@strings", status: "rebased" }
+                {
+                    name: "autopilot@logos",
+                    status: "rebased",
+                    base: "task/alpha@strings"
+                }
             ])
-            // The child's branch tip is byte-for-byte unchanged — it was NOT
-            // rebased onto main (no flatten), and the advanced tip is NOT
-            // reachable from it.
-            expect(await sh(source, "rev-parse", "task/alpha@logos")).toBe(
-                logosBefore
-            )
-            await expect(
-                sh(
-                    source,
-                    "merge-base",
-                    "--is-ancestor",
-                    tip,
-                    "task/alpha@logos"
-                )
-            ).rejects.toThrow()
-            // The root really did take the advanced tip.
+            // The advanced main is now reachable from the parent...
             await sh(
                 source,
                 "merge-base",
@@ -1475,6 +1700,416 @@ describe("sync command", () => {
                 tip,
                 "task/alpha@strings"
             )
+            // ...and, through the restack, from the child too.
+            await sh(
+                source,
+                "merge-base",
+                "--is-ancestor",
+                tip,
+                "task/alpha@logos"
+            )
+            // The child's parent IS the parent's new tip — it sits directly on
+            // top of P-new, no flatten onto main.
+            const stringsTip = await sha("autopilot", "task/alpha@strings")
+            const logosParent = await sha("autopilot", "task/alpha@logos^")
+            expect(logosParent).toBe(stringsTip)
+            // The child carries ONLY its own commit beyond the parent: the
+            // commits in parent..child are EXACTLY ["logos work"], and the
+            // parent's "strings work" appears exactly once in the full history
+            // (P's, reached through the parent — never duplicated into C).
+            const own = await sh(
+                source,
+                "log",
+                "--format=%s",
+                "task/alpha@strings..task/alpha@logos"
+            )
+            expect(own.split("\n").filter((l) => l !== "")).toEqual([
+                "logos work"
+            ])
+            const log = await subjects("autopilot", "task/alpha@logos")
+            expect(log[0]).toBe("logos work")
+            expect(log.filter((s) => s === "strings work")).toHaveLength(1)
+            expect(log.filter((s) => s === "logos work")).toHaveLength(1)
+            // A clean run leaves NO persisted restack refs behind.
+            expect(await restackRefExists("logos")).toBe(false)
+        })
+
+        it("Decision A independence: repoA's stack root conflicts (subtree pruned) while repoB's independent root still rebases", async () => {
+            await makeSource("autopilot")
+            await makeSource("web")
+            await register(["autopilot", "web"])
+            // repoA (autopilot): a stack whose ROOT conflicts on README.md.
+            await openStack("autopilot", {
+                root: "strings",
+                child: "logos"
+            })
+            // Make the root's branch edit README.md, and advance autopilot's
+            // upstream README.md differently → the root's rebase conflicts.
+            const stringsWt = path.join(
+                root,
+                "tasks",
+                "alpha",
+                "autopilot@strings"
+            )
+            await fsp.writeFile(
+                path.join(stringsWt, "README.md"),
+                "from strings\n"
+            )
+            await sh(stringsWt, "add", "README.md")
+            await sh(stringsWt, "commit", "-m", "strings edits readme")
+            await advanceUpstream("autopilot", "README.md", "from upstream\n")
+
+            // repoB (web): an INDEPENDENT root that rebases cleanly.
+            const webWt = await openWorktree("web", "alpha")
+            await fsp.writeFile(path.join(webWt, "work.txt"), "web work\n")
+            await sh(webWt, "add", "work.txt")
+            await sh(webWt, "commit", "-m", "web task work")
+            const webTip = await advanceUpstream("web", "u.txt", "web\n")
+            // web is registered+present but NOT in the (autopilot-only) scope —
+            // widen scope to include it so it's a real independent root here.
+            await fsp.writeFile(
+                path.join(root, "tasks", "alpha", "ubertask.yml"),
+                [
+                    "goal: |",
+                    "  stacked",
+                    "",
+                    "repos:",
+                    "  - autopilot@strings",
+                    "  - autopilot@logos",
+                    "  - web",
+                    "",
+                    "branches:",
+                    "  autopilot@logos:",
+                    "    name: task/alpha@logos",
+                    "    adopted: false",
+                    "    base: autopilot@strings",
+                    ""
+                ].join("\n")
+            )
+            const logosBefore = await sha("autopilot", "task/alpha@logos")
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: {
+                repos: { name: string; status: string; reason?: string }[]
+            }
+            try {
+                json = await captureJson(async () => {
+                    await sync.run({
+                        task: "alpha",
+                        from: undefined,
+                        "no-hooks": false,
+                        check: false
+                    })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+
+            // autopilot's root conflicts; its child is pruned "parent not
+            // synced"; web — an independent root — rebases regardless. (Order:
+            // logos sorts before strings, but the walk emits the parent first.)
+            expect(json.repos).toEqual([
+                {
+                    name: "autopilot@strings",
+                    status: "conflict",
+                    base: "origin/main"
+                },
+                {
+                    name: "autopilot@logos",
+                    status: "skipped",
+                    reason: "parent not synced",
+                    base: "task/alpha@strings"
+                },
+                { name: "web", status: "rebased", base: "origin/main" }
+            ])
+            // web really took its advanced tip — NOT held back by autopilot.
+            expect(await reachable("web", "alpha", webTip)).toBe(true)
+            // The pruned child is untouched, and its fork-point ref is KEPT for
+            // the resume (the root is mid-rebase).
+            expect(await sha("autopilot", "task/alpha@logos")).toBe(logosBefore)
+            expect(await restackRefExists("logos")).toBe(true)
+            // Clean up the in-progress rebase so afterEach can remove the tree.
+            const stringsWtPath = path.join(
+                root,
+                "tasks",
+                "alpha",
+                "autopilot@strings"
+            )
+            await sh(stringsWtPath, "rebase", "--abort")
+        })
+
+        it("resume correctness: P conflicts → C pruned + ref kept → user resolves P → re-run restacks C onto P-new with only its own commit", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            const { source } = await openStack("autopilot", {
+                root: "strings",
+                child: "logos"
+            })
+            // Make the ROOT conflict: its branch edits README.md, upstream edits
+            // it differently.
+            const stringsWt = path.join(
+                root,
+                "tasks",
+                "alpha",
+                "autopilot@strings"
+            )
+            await fsp.writeFile(
+                path.join(stringsWt, "README.md"),
+                "from strings\n"
+            )
+            await sh(stringsWt, "add", "README.md")
+            await sh(stringsWt, "commit", "-m", "strings edits readme")
+            const tip = await advanceUpstream(
+                "autopilot",
+                "README.md",
+                "from upstream\n"
+            )
+            const logosBefore = await sha("autopilot", "task/alpha@logos")
+            // The fork point we expect the ref to pin: merge-base(logos, strings)
+            // BEFORE strings moves — i.e. strings' tip at child-branch time.
+            const forkExpected = await sha("autopilot", "task/alpha@logos^")
+
+            // ── Run 1: the parent conflicts ──────────────────────────────────
+            const prev1 = process.exitCode
+            process.exitCode = undefined
+            let json1: {
+                repos: { name: string; status: string; reason?: string }[]
+            }
+            try {
+                json1 = await captureJson(async () => {
+                    await sync.run({
+                        task: "alpha",
+                        from: undefined,
+                        "no-hooks": false,
+                        check: false
+                    })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = prev1
+            }
+            expect(json1.repos).toEqual([
+                {
+                    name: "autopilot@strings",
+                    status: "conflict",
+                    base: "origin/main"
+                },
+                {
+                    name: "autopilot@logos",
+                    status: "skipped",
+                    reason: "parent not synced",
+                    base: "task/alpha@strings"
+                }
+            ])
+            // The child is untouched, and its ref is present, pinning the
+            // PRE-MOVE fork point (so the resume replays only the child's work).
+            expect(await sha("autopilot", "task/alpha@logos")).toBe(logosBefore)
+            expect(await restackRefExists("logos")).toBe(true)
+            expect(await sh(source, "rev-parse", restackRef("logos"))).toBe(
+                forkExpected
+            )
+
+            // ── User resolves the parent's conflict and continues ─────────────
+            // Take upstream's README, keep strings' own commit.
+            await fsp.writeFile(
+                path.join(stringsWt, "README.md"),
+                "from upstream\n"
+            )
+            await sh(stringsWt, "add", "README.md")
+            await sh(
+                stringsWt,
+                "-c",
+                "core.editor=true",
+                "rebase",
+                "--continue"
+            )
+            // Parent now contains the advanced main.
+            await sh(
+                source,
+                "merge-base",
+                "--is-ancestor",
+                tip,
+                "task/alpha@strings"
+            )
+
+            // ── Run 2: the resume — child restacks onto P-new ─────────────────
+            const json2 = await captureJson<{
+                repos: { name: string; status: string; base?: string }[]
+            }>(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: false
+                })
+            })
+            // The parent's rebase onto origin/main is now a no-op (its finished
+            // rebase already contains main) but still reports `rebased` — the
+            // root path always rebases, it does not short-circuit. The CHILD
+            // restacks onto the parent's new tip using the preserved ref.
+            expect(json2.repos).toEqual([
+                {
+                    name: "autopilot@strings",
+                    status: "rebased",
+                    base: "origin/main"
+                },
+                {
+                    name: "autopilot@logos",
+                    status: "rebased",
+                    base: "task/alpha@strings"
+                }
+            ])
+            // The child now sits on the parent's NEW tip...
+            const stringsTip = await sha("autopilot", "task/alpha@strings")
+            expect(await sha("autopilot", "task/alpha@logos^")).toBe(stringsTip)
+            // ...the advanced main is reachable from it...
+            await sh(
+                source,
+                "merge-base",
+                "--is-ancestor",
+                tip,
+                "task/alpha@logos"
+            )
+            // ...and it carries ONLY its own commit — strings' commits are NOT
+            // replayed into it (the resume hazard the persisted ref prevents).
+            // The commits in parent..child are EXACTLY the child's own: a single
+            // "logos work". If a fresh merge-base had been used instead of the
+            // saved fork point, the parent's commits would be replayed here and
+            // this set would be larger.
+            const own = await sh(
+                source,
+                "log",
+                "--format=%s",
+                "task/alpha@strings..task/alpha@logos"
+            )
+            expect(own.split("\n").filter((l) => l !== "")).toEqual([
+                "logos work"
+            ])
+            // The full child history still contains the parent's "strings work"
+            // exactly once (P's commit, reached through the parent — never
+            // duplicated into C) and the child's own commit once.
+            const log = await subjects("autopilot", "task/alpha@logos")
+            expect(log.filter((s) => s === "logos work")).toHaveLength(1)
+            expect(log.filter((s) => s === "strings work")).toHaveLength(1)
+            // The refs are cleaned up now the run finished clean.
+            expect(await restackRefExists("logos")).toBe(false)
+        })
+
+        it("multi-level prune: P conflicts → both C and G are skipped 'parent not synced'", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            await openStack("autopilot", {
+                root: "p",
+                child: "c",
+                grandchild: "g"
+            })
+            // Make the root (p) conflict on README.md.
+            const pWt = path.join(root, "tasks", "alpha", "autopilot@p")
+            await fsp.writeFile(path.join(pWt, "README.md"), "from p\n")
+            await sh(pWt, "add", "README.md")
+            await sh(pWt, "commit", "-m", "p edits readme")
+            await advanceUpstream("autopilot", "README.md", "from upstream\n")
+
+            const previousExit = process.exitCode
+            process.exitCode = undefined
+            let json: {
+                repos: { name: string; status: string; reason?: string }[]
+            }
+            try {
+                json = await captureJson(async () => {
+                    await sync.run({
+                        task: "alpha",
+                        from: undefined,
+                        "no-hooks": false,
+                        check: false
+                    })
+                })
+                expect(process.exitCode).toBe(1)
+            } finally {
+                process.exitCode = previousExit
+            }
+            // p conflicts; c AND g (its transitive descendant) both prune.
+            expect(json.repos).toEqual([
+                {
+                    name: "autopilot@p",
+                    status: "conflict",
+                    base: "origin/main"
+                },
+                {
+                    name: "autopilot@c",
+                    status: "skipped",
+                    reason: "parent not synced",
+                    base: "task/alpha@p"
+                },
+                {
+                    name: "autopilot@g",
+                    status: "skipped",
+                    reason: "parent not synced",
+                    base: "task/alpha@c"
+                }
+            ])
+            // Both descendants' refs are kept for the resume.
+            expect(await restackRefExists("c")).toBe(true)
+            expect(await restackRefExists("g")).toBe(true)
+            // Clean up the in-progress rebase.
+            await sh(pWt, "rebase", "--abort")
+        })
+
+        it("up-to-date no-op: a re-run with no upstream change finds the child already restacked and cleans its ref", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            await openStack("autopilot", {
+                root: "strings",
+                child: "logos"
+            })
+            await advanceUpstream("autopilot", "up.txt", "x\n")
+
+            // First sync: restacks the child cleanly, clearing the ref.
+            await captureJson(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: false
+                })
+            })
+            expect(await restackRefExists("logos")).toBe(false)
+            const logosAfterFirst = await sha("autopilot", "task/alpha@logos")
+
+            // Second sync, NO upstream change: the child is already restacked on
+            // the parent's (unmoved) tip → detected up-to-date, a clean no-op.
+            const json = await captureJson<{
+                repos: { name: string; status: string; base?: string }[]
+            }>(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: false
+                })
+            })
+            // The root's rebase onto the (unchanged) origin/main is a no-op but
+            // still reports `rebased`; the CHILD is detected already-restacked
+            // (its parent's tip is already contained) — a clean `current` no-op.
+            expect(json.repos).toEqual([
+                {
+                    name: "autopilot@strings",
+                    status: "rebased",
+                    base: "origin/main"
+                },
+                {
+                    name: "autopilot@logos",
+                    status: "current",
+                    base: "task/alpha@strings"
+                }
+            ])
+            // The child's tip did not move on the no-op re-run, and no ref leaked.
+            expect(await sha("autopilot", "task/alpha@logos")).toBe(
+                logosAfterFirst
+            )
+            expect(await restackRefExists("logos")).toBe(false)
         })
     })
 })

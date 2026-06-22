@@ -477,6 +477,188 @@ describe("git integration", () => {
         })
     })
 
+    describe("mergeBase", () => {
+        it("returns the common ancestor OID of two divergent branches", async () => {
+            const repo = await cloneOrigin()
+            const base = await sh(repo.path, "rev-parse", "main")
+            // Two branches off the same main commit, each with its own commit.
+            await sh(repo.path, "switch", "-c", "a", "main")
+            await fsp.writeFile(path.join(repo.path, "a.txt"), "a\n")
+            await sh(repo.path, "add", "a.txt")
+            await sh(repo.path, "commit", "-m", "a work")
+            await sh(repo.path, "switch", "-c", "b", "main")
+            await fsp.writeFile(path.join(repo.path, "b.txt"), "b\n")
+            await sh(repo.path, "add", "b.txt")
+            await sh(repo.path, "commit", "-m", "b work")
+
+            const mb = await repo.mergeBase("a", "b")
+            expect(mb).toMatch(/^[0-9a-f]{40}$/)
+            // The common ancestor is the shared main commit they branched from.
+            expect(mb).toBe(base)
+        })
+
+        it("throws a GitError on an unknown ref (distinct from a no-op answer)", async () => {
+            const repo = await cloneOrigin()
+            const error = await repo.mergeBase("main", "nope").catch((e) => e)
+            expect(error).toBeInstanceOf(GitError)
+            expect((error as GitError).exitCode).not.toBe(0)
+        })
+    })
+
+    describe("revParse", () => {
+        it("resolves a ref to a trimmed OID", async () => {
+            const repo = await cloneOrigin()
+            const sha = await repo.revParse("main")
+            expect(sha).toMatch(/^[0-9a-f]{40}$/)
+            expect(sha).toBe(sha.trim())
+            // It agrees with git's own rev-parse.
+            expect(sha).toBe(await sh(repo.path, "rev-parse", "main"))
+        })
+
+        it("throws a GitError on a bad ref", async () => {
+            const repo = await cloneOrigin()
+            const error = await repo.revParse("does-not-exist").catch((e) => e)
+            expect(error).toBeInstanceOf(GitError)
+        })
+    })
+
+    describe("setRef / refExists / delRef", () => {
+        it("creates, reports, and deletes an arbitrary local ref", async () => {
+            const repo = await cloneOrigin()
+            const sha = await repo.revParse("main")
+            const name = "refs/uberepo/restack/demo/api"
+
+            expect(await repo.refExists(name)).toBe(false)
+            await repo.setRef(name, sha)
+            expect(await repo.refExists(name)).toBe(true)
+            // It points exactly where we set it.
+            expect(await repo.revParse(name)).toBe(sha)
+            // Such a ref lives OUTSIDE heads/remotes/tags, so it is never a
+            // branch and a plain push would not send it.
+            expect(await repo.branchExists("api")).toBe(false)
+
+            await repo.delRef(name)
+            expect(await repo.refExists(name)).toBe(false)
+        })
+
+        it("setRef moves an existing ref to a new sha", async () => {
+            const repo = await cloneOrigin()
+            const first = await repo.revParse("main")
+            const name = "refs/uberepo/restack/demo/web"
+            await repo.setRef(name, first)
+            // Advance main, then re-point the ref.
+            await fsp.writeFile(path.join(repo.path, "x.txt"), "x\n")
+            await sh(repo.path, "add", "x.txt")
+            await sh(repo.path, "commit", "-m", "advance")
+            const second = await repo.revParse("main")
+            expect(second).not.toBe(first)
+            await repo.setRef(name, second)
+            expect(await repo.revParse(name)).toBe(second)
+        })
+    })
+
+    describe("worktree.rebaseOnto", () => {
+        // Build a `main ← parent ← child` stack in the clone, advance main, and
+        // rebase parent onto main; then rebaseOnto replays ONLY the child's own
+        // commit onto the parent's new tip, never duplicating the parent's.
+        it("replays only the child's own commits onto the new base (no parent-commit duplication)", async () => {
+            const repo = await cloneOrigin()
+            // parent off main, with its own commit.
+            await sh(repo.path, "switch", "-c", "parent", "main")
+            await fsp.writeFile(path.join(repo.path, "parent.txt"), "p\n")
+            await sh(repo.path, "add", "parent.txt")
+            await sh(repo.path, "commit", "-m", "parent work")
+            // child off parent, with its own commit.
+            await sh(repo.path, "switch", "-c", "child", "parent")
+            await fsp.writeFile(path.join(repo.path, "child.txt"), "c\n")
+            await sh(repo.path, "add", "child.txt")
+            await sh(repo.path, "commit", "-m", "child work")
+            // Free both branches from the clone's main tree so they can be
+            // checked out in worktrees below.
+            await sh(repo.path, "switch", "main")
+            // Snapshot the fork point BEFORE the parent moves.
+            const fork = await repo.mergeBase("child", "parent")
+
+            // Add the child to a worktree so rebaseOnto runs there (mirrors how
+            // sync drives a per-participant worktree).
+            const wtPath = path.join(tmp, "wt-child")
+            await sh(repo.path, "worktree", "add", wtPath, "child")
+
+            // main advances; parent rebases onto it (now parent has a NEW tip).
+            await fsp.writeFile(path.join(repo.path, "main.txt"), "m\n")
+            await sh(repo.path, "add", "main.txt")
+            await sh(repo.path, "commit", "-m", "main moves")
+            const parentWtPath = path.join(tmp, "wt-parent")
+            await sh(repo.path, "worktree", "add", parentWtPath, "parent")
+            await repo.worktree(parentWtPath).rebase("main")
+            const parentNewTip = await repo.revParse("parent")
+
+            // Restack the child onto the parent's new tip via the saved fork.
+            await repo.worktree(wtPath).rebaseOnto(parentNewTip, fork, "child")
+
+            // The child now sits directly on the parent's new tip.
+            expect(await repo.revParse("child^")).toBe(parentNewTip)
+            // And carries ONLY its own commit: "parent work" appears once
+            // (parent's), "child work" once, "main moves" reachable.
+            const log = await sh(wtPath, "log", "--format=%s", "child")
+            const subjects = log.split("\n").filter((l) => l !== "")
+            expect(subjects[0]).toBe("child work")
+            expect(subjects.filter((s) => s === "child work")).toHaveLength(1)
+            expect(subjects.filter((s) => s === "parent work")).toHaveLength(1)
+            expect(subjects).toContain("main moves")
+        })
+
+        it("throws a GitError on a conflict, leaving the worktree mid-rebase (like rebase())", async () => {
+            const repo = await cloneOrigin()
+            // parent edits README; child edits the SAME line differently, so a
+            // restack onto a parent that moved README conflicts.
+            await sh(repo.path, "switch", "-c", "parent", "main")
+            await fsp.writeFile(path.join(repo.path, "README.md"), "parent\n")
+            await sh(repo.path, "commit", "-am", "parent readme")
+            await sh(repo.path, "switch", "-c", "child", "parent")
+            await fsp.writeFile(path.join(repo.path, "README.md"), "child\n")
+            await sh(repo.path, "commit", "-am", "child readme")
+            // Free both branches from the clone's main tree for the worktrees.
+            await sh(repo.path, "switch", "main")
+            const fork = await repo.mergeBase("child", "parent")
+
+            const wtPath = path.join(tmp, "wt-conflict")
+            await sh(repo.path, "worktree", "add", wtPath, "child")
+            // Move the parent so its README differs from the fork.
+            const parentWtPath = path.join(tmp, "wt-parent-conflict")
+            await sh(repo.path, "worktree", "add", parentWtPath, "parent")
+            await fsp.writeFile(
+                path.join(parentWtPath, "README.md"),
+                "parent moved\n"
+            )
+            await sh(parentWtPath, "commit", "-am", "parent moves readme")
+            const parentNewTip = await repo.revParse("parent")
+
+            const error = await repo
+                .worktree(wtPath)
+                .rebaseOnto(parentNewTip, fork, "child")
+                .catch((e) => e)
+            expect(error).toBeInstanceOf(GitError)
+            // Mid-rebase state left under the worktree's gitdir (rebase-merge
+            // or rebase-apply), exactly like Worktree.rebase on a conflict.
+            const gitFile = await fsp.readFile(
+                path.join(wtPath, ".git"),
+                "utf8"
+            )
+            const gitdir = path.resolve(
+                wtPath,
+                (
+                    gitFile.match(/^gitdir:\s*(.+)$/m) as RegExpMatchArray
+                )[1].trim()
+            )
+            expect(
+                fs.existsSync(path.join(gitdir, "rebase-merge")) ||
+                    fs.existsSync(path.join(gitdir, "rebase-apply"))
+            ).toBe(true)
+            await sh(wtPath, "rebase", "--abort")
+        })
+    })
+
     describe("GitError shape", () => {
         it("carries args, exitCode, stderr and a descriptive message", async () => {
             const repo = await cloneOrigin()

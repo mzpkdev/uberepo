@@ -5,6 +5,7 @@ import {
     participantBranch,
     sourceName,
     splitParticipant,
+    stackOrder,
     stackParent,
     taskBranch,
     worktreePath
@@ -186,5 +187,71 @@ describe("stackParent — classify a base as a sibling edge vs a remote ref", ()
         expect(stackParent("web@logos", branches, scope)).toBe("web@strings")
         // The parent itself stacks on a remote ref, so it is a root, not a child.
         expect(stackParent("web@strings", branches, scope)).toBeUndefined()
+    })
+})
+
+describe("stackOrder — topological walk of the per-repo stack forest", () => {
+    it("leaves non-stacked participants in their input order (no edges)", () => {
+        expect(stackOrder(["api", "web"], {}, ["api", "web"])).toEqual([
+            "api",
+            "web"
+        ])
+        expect(stackOrder(["api", "web"], undefined, [])).toEqual([
+            "api",
+            "web"
+        ])
+    })
+
+    it("puts a parent before its child regardless of input order", () => {
+        // logos sorts/arrives before strings, but its parent must come first.
+        const scope = ["web@strings", "web@logos"]
+        const branches = { "web@logos": { base: "web@strings" } }
+        expect(
+            stackOrder(["web@logos", "web@strings"], branches, scope)
+        ).toEqual(["web@strings", "web@logos"])
+    })
+
+    it("orders a multi-level chain parent → child → grandchild", () => {
+        const scope = ["r@p", "r@c", "r@g"]
+        const branches = {
+            "r@c": { base: "r@p" },
+            "r@g": { base: "r@c" }
+        }
+        // Even fed in reverse, the chain comes out root-first.
+        expect(stackOrder(["r@g", "r@c", "r@p"], branches, scope)).toEqual([
+            "r@p",
+            "r@c",
+            "r@g"
+        ])
+    })
+
+    it("emits every participant exactly once across several stacks and roots", () => {
+        const scope = ["a", "b@p", "b@c", "c"]
+        const branches = { "b@c": { base: "b@p" } }
+        const ordered = stackOrder(["a", "b@c", "b@p", "c"], branches, scope)
+        expect([...ordered].sort()).toEqual(["a", "b@c", "b@p", "c"])
+        // b@p precedes b@c; the independent roots keep their relative order.
+        expect(ordered.indexOf("b@p")).toBeLessThan(ordered.indexOf("b@c"))
+    })
+
+    it("treats a base whose sibling is NOT present as a root (so it still syncs)", () => {
+        // logos.base names strings, but strings isn't in `present` (its worktree
+        // was closed): logos must not wait on an absent parent.
+        const scope = ["web@strings", "web@logos"]
+        const branches = { "web@logos": { base: "web@strings" } }
+        expect(stackOrder(["web@logos"], branches, scope)).toEqual([
+            "web@logos"
+        ])
+    })
+
+    it("emits each node once even if a (validation-forbidden) cycle were present", () => {
+        // Defensive: a malformed note with a 2-cycle must not hang or duplicate.
+        const scope = ["r@x", "r@y"]
+        const branches = {
+            "r@x": { base: "r@y" },
+            "r@y": { base: "r@x" }
+        }
+        const ordered = stackOrder(["r@x", "r@y"], branches, scope)
+        expect([...ordered].sort()).toEqual(["r@x", "r@y"])
     })
 })

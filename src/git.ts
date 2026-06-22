@@ -102,6 +102,57 @@ export class Repository {
         return out.trim().length > 0
     }
 
+    // The merge-base (most recent common ancestor) OID of two commits. Distinct
+    // from isMerged: that asks the yes/no "is a an ancestor of b" via exit code,
+    // this RETURNS the boundary commit. sync's restack snapshots merge-base(child,
+    // parent) BEFORE the parent moves to use as the `git rebase --onto` upstream —
+    // the cut point below which commits belong to the parent, above which to the
+    // child. Trimmed OID.
+    async mergeBase(a: string, b: string): Promise<string> {
+        return this.raw("merge-base", a, b)
+    }
+
+    // Resolve any ref/revision to its OID (trimmed). sync reads a stacked
+    // parent's NEW tip with this after the parent rebased, to restack the child
+    // onto it. A bad ref throws a GitError (rev-parse exit 128), unlike the
+    // tolerant remoteDefault/branchExists which swallow the miss.
+    async revParse(ref: string): Promise<string> {
+        return this.raw("rev-parse", ref)
+    }
+
+    // Point a ref at `sha` (create or move it), via `git update-ref`. sync uses
+    // this to persist a stacked child's pre-move fork point under
+    // refs/uberepo/restack/<task>/<leaf> — a local-only ref (outside
+    // heads/remotes/tags, so never pushed) that both NAMES the cut point for the
+    // `--onto` restack AND keeps the parent's OLD tip reachable across a
+    // conflict-resume re-run (an unreferenced old tip could be pruned).
+    async setRef(name: string, sha: string): Promise<void> {
+        await run(["update-ref", name, sha], this.path)
+    }
+
+    // Delete a ref via `git update-ref -d`. sync deletes a child's persisted
+    // fork-point ref the moment it successfully restacks (or is found already
+    // restacked), so a clean run leaves no refs/uberepo/restack/* behind. `-d`
+    // on a missing ref is a no-op-ish error; callers only delete refs they know
+    // exist (snapshotted this run), so a miss is not expected here.
+    async delRef(name: string): Promise<void> {
+        await run(["update-ref", "-d", name], this.path)
+    }
+
+    // True when ref `name` currently exists (resolves to a commit). Mirrors
+    // branchExists but for an arbitrary fully-qualified ref, so sync can ask
+    // "does this child already have a persisted fork point?" (write-once: a
+    // leftover from an interrupted run is KEPT, not overwritten). A missing ref
+    // is a silent false.
+    async refExists(name: string): Promise<boolean> {
+        try {
+            await this.raw("rev-parse", "--verify", "--quiet", name)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // The remote default branch as a ref (e.g. "origin/main"), resolved from
     // origin/HEAD. Returns undefined when there is no remote, or origin/HEAD is
     // unset (no `git remote set-head`), so callers can fall back or error
@@ -309,6 +360,27 @@ export class Worktree {
 
     async rebase(onto: string): Promise<void> {
         await run(["rebase", onto], this.path)
+    }
+
+    // Transplant a stacked child onto its parent's NEW tip via
+    // `git rebase --onto <newbase> <upstream> [<branch>]`. `upstream` is the
+    // child's PERSISTED fork point — merge-base(child, parent) captured before
+    // the parent moved — so git replays ONLY the commits the child added beyond
+    // that boundary (its own work), never the parent's commits, onto `newbase`
+    // (the parent's new tip). A freshly-computed merge-base would be wrong after
+    // a resume (see sync's restack), which is why the caller passes the saved
+    // ref. Conflicts leave the worktree mid-rebase and throw a GitError, byte
+    // for byte like rebase() above, so sync's one catch path handles both.
+    async rebaseOnto(
+        newbase: string,
+        upstream: string,
+        branch?: string
+    ): Promise<void> {
+        const args = ["rebase", "--onto", newbase, upstream]
+        if (branch !== undefined) {
+            args.push(branch)
+        }
+        await run(args, this.path)
     }
 
     // Push the worktree's current branch to `remote`, setting upstream (`-u`) so
