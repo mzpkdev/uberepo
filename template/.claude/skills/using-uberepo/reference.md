@@ -125,6 +125,32 @@ Edit inside `tasks/<task>/<name>/`. **uberepo does NOT commit or push for you** 
 `git add`/`commit`/`push` inside each repo's worktree. Follow that repo's own
 `AGENTS.md`/`README` for its build, test, and commit conventions.
 
+### `uberepo exec <task> -- <cmd>...` — run a command in every worktree
+
+Runs one command in each of the task's worktrees, in turn — `npm test`, a lint
+script, a codemod — so one invocation drives the whole task's repos instead of
+`cd`-ing through each. uberepo runs the command; what it does is yours to own.
+
+- **`--` is required**, and splits uberepo's own flags from the command —
+  everything after it is the command, run verbatim. `uberepo exec <task> --json
+  -- npm test --watch`: `--json` is uberepo's, `npm test --watch` is the command.
+- **No shell.** The command runs as a bare program + arguments (the way uberepo
+  runs `git`), not through `sh` — so `;`, `|`, `&&`, and globs are literal args,
+  not operators. Need a shell? Run `... -- sh -c "<line>"`.
+- `--repos <name>...` — run only in this subset. A **transient filter** for this
+  run (it does NOT change the note's `repos:` scope); a name not in the task is an
+  error. Like `ship`, an in-scope repo with no worktree simply doesn't take part.
+- `--bail` — stop at the first repo whose command exits non-zero. Default: run
+  every repo and report each.
+- Each command inherits the same `UBEREPO_*` env a hook gets (`UBEREPO_TASK`,
+  `UBEREPO_REPO`, `UBEREPO_REPO_PATH`, `UBEREPO_REPO_URL`, `UBEREPO_BRANCH`,
+  `UBEREPO_WORKSPACE`) — minus the hook-only `UBEREPO_EVENT`/`UBEREPO_PR_URL`.
+- Runs **sequentially** in scope order. A non-zero exit in any repo flips exec's
+  own exit code (so a wrapper/CI sees it) but the run continues unless `--bail`.
+  Human mode streams each repo's output live under a `▸ <repo>  $ <cmd>` header;
+  `--json` captures per-repo `stdout`/`stderr`/`exitCode` and prints no live output.
+  Not a lifecycle op: no hooks, no carry, no fetch.
+
 ### `uberepo sync <task>` — rebase onto fresh upstreams
 
 Fetches and rebases each worktree onto its repo's fresh default branch.
@@ -409,6 +435,7 @@ distinct in the output.
 | `diff` | `{ task, base, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
 | `context` | `{ task, base, note?, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], pr?: { number, url, draft, state }, status: "ok" \| "skipped", reason? }] }` — `diff`'s footprint per repo (same fields, same skip reasons) plus `pr` when `gh` knows a PR for the branch (`draft` bool; `state`: gh's `OPEN`/`CLOSED`/`MERGED`); `pr` absent when the branch has no PR or `gh` is missing/failed (automatic degradation, never an error); `note` is the full task note (see below), omitted when the task has none |
 | `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], clone: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`, `"pre-clone hook failed"`, `"clone failed"`, `"not registered"`; `clone` has one entry per scoped repo cloned on demand this run (same entry shape as `clone`'s repos; a `failed` entry means that repo got no worktree, the run continued, and the exit code is non-zero); `hooks` lists every hook that ran (pre and post, the clone events included); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
+| `exec` | `{ task, command: string[], repos: [{ name, branch, exitCode?, status: "ok" \| "failed" \| "skipped", stdout?, stderr? }] }` — `command` is the argv after `--`; one entry per worktree it ran in, in sequence: `status` is `"ok"` (exit 0) or `"failed"` (non-zero), each carrying the child's `exitCode` and captured `stdout`/`stderr`. Exits non-zero if any repo failed; `--bail` stops after the first. A `skipped` entry (no `exitCode`) is an in-scope repo with no worktree — like `ship`, those normally don't appear at all |
 | `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
 | `sync --check` | `{ task, onto, check: true, repos: [{ name, status: "clean" \| "conflicts" \| "current" \| "dirty" \| "skipped", files?, reason? }] }` — a forecast: nothing was rebased, no hooks/carry keys; `files` (string[]) lists the likely-conflicted paths when merge-tree hit conflicts (also present on a `dirty` repo whose committed tips would conflict); `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"`, or the per-repo error; exits 0 even when conflicts are forecast |
 | `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |

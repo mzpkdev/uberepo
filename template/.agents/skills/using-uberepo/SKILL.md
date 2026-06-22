@@ -55,6 +55,12 @@ across them at once and switch tasks by switching directories — not `git check
      + `task/<task>@<alias>` branch) in the same repo. Idempotent.
    - Edit in `tasks/<task>/<name>/`. **Commit and push per repo yourself** —
      uberepo does NOT commit or push. Follow each repo's own AGENTS.md/README.
+   - `uberepo exec <task> -- <cmd>...` — run one command (tests, a lint script,
+     `git status`) in every worktree in turn, instead of `cd`-ing through them.
+     `--` is required (everything after it is the command; no shell — use
+     `-- sh -c "..."` for pipes/globs); `--repos` narrows it, `--bail` stops at the
+     first non-zero exit. Exits non-zero if any repo's command did. No hooks/carry/
+     fetch; `--json` for per-repo `exitCode`/`stdout`/`stderr`.
    - `uberepo sync <task>` — rebase each worktree onto its fresh default branch.
      Refuses a dirty worktree; stops on conflict and leaves that repo mid-rebase.
      `--check` forecasts all that first, per repo (fetch only — no rebase, no

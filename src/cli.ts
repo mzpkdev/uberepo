@@ -4,6 +4,7 @@ import clone from "@/commands/clone"
 import close from "@/commands/close"
 import context from "@/commands/context"
 import diff from "@/commands/diff"
+import exec from "@/commands/exec"
 import init from "@/commands/init"
 import open from "@/commands/open"
 import prune from "@/commands/prune"
@@ -22,6 +23,7 @@ execute(
         close,
         context,
         diff,
+        exec,
         init,
         open,
         prune,

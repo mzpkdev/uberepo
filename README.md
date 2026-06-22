@@ -164,6 +164,7 @@ decisions:
 | `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`, `--branch`; repos scoped via `--repos` clone on demand. A `--repos repo@alias` token gives one repo a second branch in the task ([below](#more-than-one-branch-in-a-repo)). `--branch <repo>=<name>` (or a bare `--branch <name>` for all repos) **adopts** an existing branch instead of creating `task/<task>` — `close`/`prune` then keep that branch. |
 | `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
 | `uberepo diff <task>` | Show the task's footprint: commits ahead + diffstat per repo. |
+| `uberepo exec <task> -- <cmd>...` | Run one command inside every one of the task's worktrees. `--repos` narrows it; `--bail` stops at the first failure. Exits non-zero if any repo's command did. |
 | `uberepo context <task>` | Everything to resume a task — note, per-repo state, PR state — as a paste-ready markdown brief. |
 | `uberepo sync <task>` | Rebase the task's worktrees onto fresh upstreams. `--check` forecasts the conflicts without rebasing. |
 | `uberepo ship <task>` | Push every branch and open a draft PR per repo (needs `gh`). |
