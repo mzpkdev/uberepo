@@ -1387,5 +1387,94 @@ describe("sync command", () => {
                 await sh(source, "merge-base", "--is-ancestor", tip, branch)
             }
         })
+
+        it("never flattens a STACKED child onto main; a sibling root still rebases", async () => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            // strings is a root; logos stacks on it (branched off the parent
+            // branch, with its own commit on top).
+            const stringsWt = await openAliased("autopilot", "alpha", "strings")
+            await fsp.writeFile(
+                path.join(stringsWt, "strings.txt"),
+                "strings\n"
+            )
+            await sh(stringsWt, "add", "strings.txt")
+            await sh(stringsWt, "commit", "-m", "strings work")
+            const source = path.join(root, "source", "autopilot")
+            const logosWt = path.join(root, "tasks", "alpha", "autopilot@logos")
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                "task/alpha@logos",
+                logosWt,
+                "task/alpha@strings"
+            )
+            await fsp.writeFile(path.join(logosWt, "logos.txt"), "logos\n")
+            await sh(logosWt, "add", "logos.txt")
+            await sh(logosWt, "commit", "-m", "logos work")
+            // The note declares the sibling edge logos.base = autopilot@strings.
+            await fsp.mkdir(path.join(root, "tasks", "alpha"), {
+                recursive: true
+            })
+            await fsp.writeFile(
+                path.join(root, "tasks", "alpha", "ubertask.yml"),
+                "goal: |\n  stacked\n\nrepos:\n  - autopilot@strings\n  - autopilot@logos\n\nbranches:\n  autopilot@logos:\n    name: task/alpha@logos\n    adopted: false\n    base: autopilot@strings\n"
+            )
+            // The child's tip before sync — it must be UNCHANGED after.
+            const logosBefore = await sh(
+                source,
+                "rev-parse",
+                "task/alpha@logos"
+            )
+            // Others advanced the shared upstream's main.
+            const tip = await advanceUpstream("autopilot", "up.txt", "x\n")
+
+            const json = await captureJson<{
+                repos: { name: string; status: string; reason?: string }[]
+            }>(async () => {
+                await sync.run({
+                    task: "alpha",
+                    from: undefined,
+                    "no-hooks": false,
+                    check: false
+                })
+            })
+
+            // The root rebased onto the advanced default; the stacked child was
+            // skipped with the restack-pending reason.
+            expect(json.repos).toEqual([
+                {
+                    name: "autopilot@logos",
+                    status: "skipped",
+                    reason: "stacked (restack pending)"
+                },
+                { name: "autopilot@strings", status: "rebased" }
+            ])
+            // The child's branch tip is byte-for-byte unchanged — it was NOT
+            // rebased onto main (no flatten), and the advanced tip is NOT
+            // reachable from it.
+            expect(await sh(source, "rev-parse", "task/alpha@logos")).toBe(
+                logosBefore
+            )
+            await expect(
+                sh(
+                    source,
+                    "merge-base",
+                    "--is-ancestor",
+                    tip,
+                    "task/alpha@logos"
+                )
+            ).rejects.toThrow()
+            // The root really did take the advanced tip.
+            await sh(
+                source,
+                "merge-base",
+                "--is-ancestor",
+                tip,
+                "task/alpha@strings"
+            )
+        })
     })
 })

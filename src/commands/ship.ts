@@ -26,6 +26,7 @@ import { title } from "@/options/title"
 import {
     baseFor,
     branchFor,
+    stackParent,
     taskParticipants,
     UBERTASK_FILENAME,
     worktreePath
@@ -41,12 +42,18 @@ import { normalizeRepository } from "@/url"
 //   pushed: whether the branch was pushed this run
 //   pr:     present once a PR is known — its number, url, and whether this run
 //           created it or it already existed (update == push only, never edited)
+//   base:   this entry's resolved gh base — the remote default branch for a
+//           root, or the PARENT participant's branch for a stacked child (its PR
+//           is opened against the sibling, not main). Present once resolved, so
+//           the --json per-repo output is truthful even when the run mixes roots
+//           and children (the run-level baseLabel can only carry the roots').
 //   reason: the skip reason (mirrors the human line)
 //   error:  the failure message (mirrors the human line)
 type ShipRepo = {
     name: string
     branch: string
     pushed: boolean
+    base?: string
     pr?: {
         number: number
         url: string
@@ -61,7 +68,11 @@ type ShipRepo = {
 // push: its flat participant name (`repo` or `repo@alias`), the bare repo it
 // belongs to (for the hooks' UBEREPO_REPO_URL), source clone, worktree, the
 // branch to push (adopted/--branch, else its default), the gh-facing base
-// branch, and the mutable outcome it writes its result into.
+// branch, and the mutable outcome it writes its result into. A STACKED child
+// also carries its parent's participant token and branch: the create loop opens
+// its PR against `ghBase` = the parent branch, which must already be on the
+// remote — so the loop skips the child when the parent neither pushed this run
+// nor pre-exists on origin (see the parent-dependency guard).
 type Pending = {
     name: string
     repo: string
@@ -69,6 +80,7 @@ type Pending = {
     dest: string
     branch: string
     ghBase: string
+    parent?: { token: string; branch: string }
     out: ShipRepo
 }
 
@@ -90,6 +102,65 @@ const removeTemp = async (file: string): Promise<void> => {
 // "origin/main". Strip a leading "<remote>/" so the PR targets `main`, not a ref
 // gh can't resolve. An explicit --base is passed through untouched.
 const ghBaseName = (ref: string): string => ref.replace(/^[^/]+\//, "")
+
+// Order participants parent-BEFORE-child so a stacked child is shipped after the
+// sibling it stacks on. ship's push + PR-create is ONE loop pass, and a child's
+// `gh pr create --base task/<task>@parent` needs the parent branch already on
+// the remote — so the parent must be pushed earlier in the same pass, which a
+// parent-first order over the single pass guarantees. A stable topological sort
+// of the per-repo stack forest (edges from stackParent): repeatedly emit any
+// not-yet-emitted participant all of whose in-scope parents are already emitted,
+// scanning in the input order so non-stacked participants and independent
+// chains keep their original relative order. `scope` is the task's participant
+// set, the universe stackParent classifies a base against. Pure.
+const parentFirstOrder = (
+    names: string[],
+    branches: Record<string, { base?: string }> | undefined,
+    scope: string[]
+): string[] => {
+    // Each participant's parent token, but only for parents that are also in
+    // THIS run's set — a parent outside the run can't gate the child's position
+    // (it isn't being ordered here; the remote-existence guard handles it).
+    const inRun = new Set(names)
+    const parentOf = new Map<string, string>()
+    for (const name of names) {
+        const parent = stackParent(name, branches, scope)
+        if (parent !== undefined && inRun.has(parent)) {
+            parentOf.set(name, parent)
+        }
+    }
+    const ordered: string[] = []
+    const emitted = new Set<string>()
+    // Bounded by names.length passes (each pass emits at least one unless a
+    // cycle blocks progress — validation forbids cycles, but the guard below
+    // keeps a malformed note from looping forever: it appends the remainder).
+    while (ordered.length < names.length) {
+        let progressed = false
+        for (const name of names) {
+            if (emitted.has(name)) {
+                continue
+            }
+            const parent = parentOf.get(name)
+            if (parent === undefined || emitted.has(parent)) {
+                ordered.push(name)
+                emitted.add(name)
+                progressed = true
+            }
+        }
+        if (!progressed) {
+            // A residual cycle (shouldn't happen post-validation): append the
+            // rest in input order rather than spin, so ship still runs.
+            for (const name of names) {
+                if (!emitted.has(name)) {
+                    ordered.push(name)
+                    emitted.add(name)
+                }
+            }
+            break
+        }
+    }
+    return ordered
+}
 
 export default defineCommand({
     name: "ship",
@@ -195,9 +266,20 @@ export default defineCommand({
             targets = universe.filter((n) => filter.includes(n))
         }
 
+        // Order parent-before-child within each repo so a stacked child ships
+        // AFTER the sibling it stacks on. push + PR-create is a single pass, and
+        // a child's `gh pr create --base task/<task>@parent` needs the parent
+        // branch already on the remote — so the parent must be pushed earlier in
+        // the same pass. Non-stacked participants keep their sorted order. The
+        // per-repo result order in the JSON follows suit (results are pushed in
+        // this order), which reads naturally: a parent above its children.
+        targets = parentFirstOrder(targets, note?.branches, scope)
+
         // The run-level base, reported in the JSON: an explicit --base wins;
         // otherwise it is filled with the first repo's resolved default branch
         // name (by convention the same across repos). Empty until resolved.
+        // This is the ROOTS' base; a stacked child's own base (its parent
+        // branch) rides on its per-repo `base` field, not this scalar.
         let baseLabel = argv.base ? ghBaseName(argv.base) : ""
 
         if (targets.length === 0) {
@@ -242,34 +324,67 @@ export default defineCommand({
             // default: task/<task> bare, task/<task>@<alias> aliased).
             const branch = branchFor(argv.task, name, note?.branches)
 
-            // Resolve this participant's base: --base wins; then the persisted
-            // per-participant base (an adopted branch's PR base — so "ahead"
-            // counts against the PR's real target, not a flattened
-            // remoteDefault); else its repo's remote default. No base at all →
-            // can't compute "ahead", skip.
-            const baseRef =
-                argv.base ??
-                baseFor(name, note?.branches) ??
-                (await repo.remoteDefault())
-            if (!baseRef) {
-                results.push({
-                    name,
-                    branch,
-                    pushed: false,
-                    status: "skipped",
-                    reason: "cannot resolve base — pass --base <ref>"
-                })
-                terminal.log(`${name}: cannot resolve base — pass --base <ref>`)
-                continue
-            }
-            if (baseLabel === "") {
-                baseLabel = ghBaseName(baseRef)
+            // Classify this participant's base: a sibling participant in scope
+            // (a `--stack` edge) makes it a STACKED CHILD; otherwise its base is
+            // a remote ref (an adopted branch's PR base, or the remote default).
+            const parentToken = stackParent(name, note?.branches, scope)
+
+            // Resolve the base ref to count "ahead" against AND the gh base the
+            // PR targets. Two shapes:
+            //   - stacked child: both are the PARENT's local branch (e.g.
+            //     task/<task>@strings). "ahead" then counts the child's commits
+            //     BEYOND its parent (a non-empty stacked PR), and the gh base is
+            //     that branch verbatim — NOT ghBaseName-stripped (it's a local
+            //     branch, not origin/...). --base is intentionally NOT honoured
+            //     for a stacked child: the edge names its base.
+            //   - root: --base wins; then the persisted remote base (an adopted
+            //     branch's PR base — so "ahead" counts against the PR's real
+            //     target, not a flattened remoteDefault); else the remote
+            //     default. The gh base is ghBaseName-stripped. No base at all →
+            //     can't compute "ahead", skip.
+            let baseRef: string | undefined
+            let ghBase: string
+            let parent: { token: string; branch: string } | undefined
+            if (parentToken !== undefined) {
+                const parentBranch = branchFor(
+                    argv.task,
+                    parentToken,
+                    note?.branches
+                )
+                baseRef = parentBranch
+                ghBase = parentBranch
+                parent = { token: parentToken, branch: parentBranch }
+            } else {
+                baseRef =
+                    argv.base ??
+                    baseFor(name, note?.branches) ??
+                    (await repo.remoteDefault())
+                if (!baseRef) {
+                    results.push({
+                        name,
+                        branch,
+                        pushed: false,
+                        status: "skipped",
+                        reason: "cannot resolve base — pass --base <ref>"
+                    })
+                    terminal.log(
+                        `${name}: cannot resolve base — pass --base <ref>`
+                    )
+                    continue
+                }
+                ghBase = ghBaseName(baseRef)
+                // Only a ROOT contributes to the run-level base scalar; a
+                // stacked child's base is its parent branch, carried per-entry.
+                if (baseLabel === "") {
+                    baseLabel = ghBase
+                }
             }
 
             if (await wt.dirty()) {
                 results.push({
                     name,
                     branch,
+                    base: ghBase,
                     pushed: false,
                     status: "skipped",
                     reason: "uncommitted changes"
@@ -279,12 +394,15 @@ export default defineCommand({
             }
 
             // "ahead of base": any commit on the branch not in baseRef. None →
-            // nothing to ship (GitHub rejects an empty PR), so skip.
+            // nothing to ship (GitHub rejects an empty PR), so skip. For a
+            // stacked child baseRef is the parent branch, so this counts the
+            // child's own commits beyond the parent.
             const ahead = await countAhead(repo, baseRef, branch)
             if (ahead === 0) {
                 results.push({
                     name,
                     branch,
+                    base: ghBase,
                     pushed: false,
                     status: "skipped",
                     reason: "nothing to ship"
@@ -296,6 +414,7 @@ export default defineCommand({
             const out: ShipRepo = {
                 name,
                 branch,
+                base: ghBase,
                 pushed: false,
                 status: "shipped"
             }
@@ -306,7 +425,8 @@ export default defineCommand({
                 source,
                 dest,
                 branch,
-                ghBase: ghBaseName(baseRef),
+                ghBase,
+                parent,
                 out
             })
         }
@@ -315,8 +435,33 @@ export default defineCommand({
         // PR. A push or gh failure for one repo is logged, flips that repo to
         // "failed", and the loop continues — never aborts the whole ship. An
         // existing PR is left untouched (push alone refreshes it), so a re-run
-        // never clobbers a human-edited title or body.
+        // never clobbers a human-edited title or body. Parent-first order (set
+        // above) means a stacked child is reached AFTER its parent in this same
+        // pass, so the parent's push has already happened — recorded in
+        // `pushedParents` so the child knows whether its `--base` branch exists
+        // on the remote yet.
+        const pushedParents = new Set<string>()
         for (const item of pending) {
+            // Parent-dependency guard: a stacked child's PR is opened against
+            // its parent's branch (`item.ghBase`), which `gh pr create` requires
+            // to already be ON THE REMOTE. If the parent did NOT push this run
+            // (skipped: not-ahead / dirty / pre-ship-fail / push-fail) AND its
+            // branch isn't already on origin, the create would fail — so skip
+            // the child up front with an actionable reason instead. This is
+            // ship's one cross-participant dependency; the eventual restack is
+            // Phase 3's job.
+            if (item.parent && !pushedParents.has(item.parent.token)) {
+                const repo = git(item.source)
+                if (!(await repo.remoteBranchExists(item.parent.branch))) {
+                    item.out.status = "skipped"
+                    item.out.reason = `parent ${item.parent.token} not on remote — ship it first`
+                    terminal.log(
+                        `${item.name}: parent ${item.parent.token} not on remote — ship it first`
+                    )
+                    continue
+                }
+            }
+
             // pre-ship GATES the ship: a non-zero exit skips this repo
             // (nothing is pushed, no PR is touched), the run continues, and
             // the command exits non-zero at the end. Runs in the worktree
@@ -351,6 +496,10 @@ export default defineCommand({
             try {
                 await wt.push(item.branch, { force: argv.force })
                 item.out.pushed = true
+                // This participant's branch is now on the remote, so any child
+                // stacking on it (reached later in this parent-first pass) can
+                // safely open its PR against it.
+                pushedParents.add(item.name)
                 terminal.log(`${item.name}: pushed ${item.branch}`)
             } catch (error) {
                 fail(item.out, pushError(error, argv.force))
@@ -369,6 +518,11 @@ export default defineCommand({
                     if (existing) {
                         // PR already open: push already refreshed it — do NOT
                         // edit its title or body (never clobber human edits).
+                        // This also means a PR first opened FLAT then later
+                        // declared stacked keeps its old base: we never run
+                        // `gh pr edit --base` to re-stack an existing PR. That
+                        // residual is accepted for this slice (re-stacking open
+                        // PRs is out of scope until the sync restack lands).
                         item.out.pr = {
                             number: existing.number,
                             url: existing.url,

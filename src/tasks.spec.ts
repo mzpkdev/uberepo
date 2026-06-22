@@ -5,6 +5,7 @@ import {
     participantBranch,
     sourceName,
     splitParticipant,
+    stackParent,
     taskBranch,
     worktreePath
 } from "@/tasks"
@@ -147,5 +148,43 @@ describe("baseFor", () => {
         }
         expect(baseFor("autopilot@bug-fix", branches)).toBe("develop")
         expect(baseFor("autopilot@add-feature", branches)).toBe("release/2")
+    })
+})
+
+describe("stackParent — classify a base as a sibling edge vs a remote ref", () => {
+    // The whole task scope; the classifier asks only whether the stored base
+    // names one of these participants.
+    const scope = ["web@strings", "web@logos", "api"]
+
+    it("a base naming an in-scope sibling is the stack parent", () => {
+        const branches = { "web@logos": { base: "web@strings" } }
+        expect(stackParent("web@logos", branches, scope)).toBe("web@strings")
+    })
+
+    it("a base that is a remote ref (not in scope) is NOT a stack edge", () => {
+        // `develop` is a remote ref an adopted branch's PR targets — it is not a
+        // participant, so it stays a remote base, never a sibling.
+        const branches = { "web@logos": { base: "develop" } }
+        expect(stackParent("web@logos", branches, scope)).toBeUndefined()
+    })
+
+    it("an unset base is not a stack edge (a created branch on its default)", () => {
+        expect(stackParent("api", {}, scope)).toBeUndefined()
+        expect(stackParent("api", undefined, scope)).toBeUndefined()
+        expect(
+            stackParent("web@logos", { "web@logos": {} }, scope)
+        ).toBeUndefined()
+    })
+
+    it("resolves a base keyed by the FULL aliased token to its sibling", () => {
+        // Both child and parent are aliased participants of the one repo; the
+        // edge is keyed and resolved by the full `@`-token.
+        const branches = {
+            "web@logos": { base: "web@strings" },
+            "web@strings": { base: "develop" }
+        }
+        expect(stackParent("web@logos", branches, scope)).toBe("web@strings")
+        // The parent itself stacks on a remote ref, so it is a root, not a child.
+        expect(stackParent("web@strings", branches, scope)).toBeUndefined()
     })
 })

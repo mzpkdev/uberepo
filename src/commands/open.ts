@@ -8,10 +8,12 @@ import type { HookResult } from "@/hooks"
 import {
     type OpenRepo,
     parseBranchSpecs,
+    parseStackSpecs,
     planOpen,
     summarize,
     validateBranchScope,
     validateParticipants,
+    validateStackSpecs,
     validateSuppliedRepos
 } from "@/open-plan"
 import { collectSources, openRepoWorktree } from "@/open-steps"
@@ -20,9 +22,11 @@ import { from } from "@/options/from"
 import { goal } from "@/options/goal"
 import { noHooks } from "@/options/no-hooks"
 import { repos } from "@/options/repos"
+import { stack } from "@/options/stack"
 import { TEMPLATE_DIR } from "@/package-root"
 import type { CloneRepo } from "@/sources"
 import {
+    branchFor,
     participantBranch,
     type TaskNote,
     taskPath,
@@ -43,7 +47,7 @@ export default defineCommand({
     description:
         "Open a task, creating its worktree in every source repository",
     arguments: [task],
-    options: [from, goal, repos, branchOpt, noHooks],
+    options: [from, goal, repos, branchOpt, stack, noHooks],
     async run(argv) {
         const config = await Config.read()
         const root = await Config.root()
@@ -56,6 +60,13 @@ export default defineCommand({
         // open step; here it is only parsed and — once targets are known —
         // validated against the scope.
         const branchSpec = parseBranchSpecs(argv.branch)
+        // The resolved --stack edges (child→parent), validated for SHAPE up
+        // front (malformed token, duplicate child, self-edge) and — once the
+        // scope resolves — against the task's scope/repos/cycles. Each edge
+        // writes a child participant's note `base` to its parent's token, so the
+        // child's PR is opened on the parent's branch instead of the remote
+        // default. Applied to the branch records as a post-step pass below.
+        const stackSpecs = parseStackSpecs(argv.stack)
 
         // The registered flat names (registration order) with their URLs, and
         // which of them are already cloned, read off disk. Whether an uncloned
@@ -124,6 +135,13 @@ export default defineCommand({
         // error (fail loud, create nothing — like the unknown-name guard).
         // Checked against the worktree targets, the repos a branch can apply to.
         validateBranchScope(branchSpec, plan.targets)
+        // A `--stack <child>=<parent>` edge is validated against the task's
+        // SCOPE (not the run's targets — a parent can be in scope yet already
+        // open and not a target this run), its repos (cross-repo edges are
+        // rejected), and the MERGED stored+new graph (cycles are rejected,
+        // including one spanning two opens). Fail loud, create nothing — like
+        // the unknown-name guard. The stored edges come from the existing note.
+        validateStackSpecs(stackSpecs, plan.scope, existing?.branches)
 
         // Warn + skip the uncloned repos this run will NOT touch (registered
         // but outside the targets), the way status does, so a partially-cloned
@@ -225,17 +243,43 @@ export default defineCommand({
             }
         }
 
+        // Apply the `--stack` edges as a post-step pass, AFTER the open steps so
+        // an explicit `--stack` OVERRIDES a PR-discovered base (open-steps'
+        // discoverBase) for the same child: the child's recorded `base` becomes
+        // its PARENT's participant token (a sibling edge), which ship/sync/
+        // footprint translate to the parent's branch name. Two record shapes:
+        //   - the child was opened/skipped THIS run with a fresh record →
+        //     re-point its base in place.
+        //   - the child is already open (an additive re-open declaring a new
+        //     edge, so the step recorded nothing) → synthesize a record from the
+        //     note's stored entry (preserving its name/adopted), else the
+        //     participant default, and stamp the base on. This keeps `--stack`
+        //     additive: a new edge on re-open lands without re-opening anything.
+        for (const [child, parent] of Object.entries(stackSpecs)) {
+            const recorded = branchRecords[child] ?? {
+                name: branchFor(argv.task, child, existing?.branches),
+                adopted: existing?.branches?.[child]?.adopted ?? false
+            }
+            recorded.base = parent
+            branchRecords[child] = recorded
+        }
+
         // The branch records worth persisting: only those that DEVIATE from the
-        // participant's default — an adopted branch, OR a created branch with a
-        // non-default name (an explicit --branch). A participant on its plain
-        // default (task/<task> bare, task/<task>@<alias> aliased) is dropped:
+        // participant's default — an adopted branch, a created branch with a
+        // non-default name (an explicit --branch), OR a branch with a recorded
+        // base (a `--stack` edge, even on a participant otherwise on its plain
+        // default). A participant on its plain default with no base is dropped:
         // branchFor() reconstructs that default from the token, so storing it
         // would just be a redundant entry. This keeps the `branches:` map an
         // overrides-only record even when some participants in the same open
         // deviate and others don't.
         const deviating: Record<string, UbertaskBranch> = {}
         for (const [name, b] of Object.entries(branchRecords)) {
-            if (b.adopted || b.name !== participantBranch(argv.task, name)) {
+            if (
+                b.adopted ||
+                b.name !== participantBranch(argv.task, name) ||
+                b.base !== undefined
+            ) {
                 deviating[name] = b
             }
         }

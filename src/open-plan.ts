@@ -1,7 +1,12 @@
 import type { CarryEntry } from "@/carry"
 import type { HookResult } from "@/hooks"
 import type { CloneRepo } from "@/sources"
-import { ALIAS_SEPARATOR, splitParticipant, type TaskNote } from "@/tasks"
+import {
+    ALIAS_SEPARATOR,
+    splitParticipant,
+    stackParent,
+    type TaskNote
+} from "@/tasks"
 
 // The PURE decision core of `open`. Everything here works on in-memory values —
 // no fs, no git, no terminal — so the scope/note/exit-code rules can be reasoned
@@ -90,6 +95,123 @@ export const validateBranchScope = (
             throw new Error(
                 `--branch ${repo}=${spec.perRepo[repo]} names a repo outside this open's scope — in scope: ${known}. Add it with --repos, or drop the --branch entry.`
             )
+        }
+    }
+}
+
+// Classify the raw `--stack` tokens into a child→parent map, failing loud on a
+// malformed option BEFORE anything is created (mirrors parseBranchSpecs'
+// fail-first contract). Each token is `<child>=<parent>`, split on the FIRST `=`
+// (a participant token never contains `=`, so a single split is unambiguous).
+// Simpler than parseBranchSpecs: there is no bare/all form — a base is inherently
+// per-participant, so every token names exactly one edge. Undefined / [] → {}.
+// Errors, each naming the offender: an empty side of `=`, a child declared twice
+// (a branch stacks on at MOST one parent), or a self-edge (a branch can't stack
+// on itself). The deeper scope/cross-repo/cycle checks are validateStackSpecs'
+// job — this only parses the shape.
+export const parseStackSpecs = (
+    tokens: string[] | undefined
+): Record<string, string> => {
+    const specs: Record<string, string> = {}
+    if (tokens === undefined) {
+        return specs
+    }
+    for (const token of tokens) {
+        const eq = token.indexOf("=")
+        if (eq === -1) {
+            throw new Error(
+                `--stack ${token} is malformed — expected <child>=<parent>.`
+            )
+        }
+        const child = token.slice(0, eq)
+        const parent = token.slice(eq + 1)
+        if (child === "" || parent === "") {
+            throw new Error(
+                `--stack ${token} is malformed — expected <child>=<parent>.`
+            )
+        }
+        if (specs[child] !== undefined) {
+            throw new Error(
+                `--stack was given two parents for ${child} (${specs[child]}, ${parent}) — a branch stacks on at most one sibling.`
+            )
+        }
+        if (child === parent) {
+            throw new Error(
+                `--stack ${token} stacks ${child} on itself — a branch cannot stack on its own branch.`
+            )
+        }
+        specs[child] = parent
+    }
+    return specs
+}
+
+// Validate the `--stack <child>=<parent>` edges against the run's SCOPE BEFORE
+// any IO — fail loud, create nothing (mirrors validateBranchScope's contract).
+// The check is against the MERGED view of the edges already stored in the note
+// PLUS the new specs, so a cycle that spans two `open` runs (run A declares
+// a→b, run B declares b→a) is still caught at plan time. Three checks, each
+// throwing a clear message naming the offender:
+//   - parent ∉ scope → throw. Checked against `scope`, NOT this run's targets:
+//     a parent can be in scope yet already open / not a target this run, and a
+//     base is a sibling-in-the-TASK edge, not a sibling-opened-together one.
+//   - cross-repo (child's repo ≠ parent's repo) → throw. A branch can only stack
+//     within one git repo; splitParticipant(token).repo is the repo identity.
+//   - a cycle in the merged child→parent map (a self-edge included) → throw,
+//     naming the cycle. A stack is a forest, never a ring.
+// `scope` is the task's declared participant set (plan.scope). `storedBranches`
+// is the note's existing `branches:` map; its edges are derived via stackParent
+// over the stored scope so only true sibling edges (not remote-ref bases) merge.
+export const validateStackSpecs = (
+    specs: Record<string, string>,
+    scope: string[],
+    storedBranches: Record<string, { base?: string }> | undefined
+): void => {
+    // Per-edge shape checks on the NEW specs first (the stored edges already
+    // passed these when they were written): the parent must be in scope, and a
+    // child can only stack on a sibling of the same repo.
+    for (const [child, parent] of Object.entries(specs)) {
+        if (!scope.includes(parent)) {
+            const known = scope.join(", ") || "(none in scope)"
+            throw new Error(
+                `--stack ${child}=${parent} names a parent outside this task's scope — in scope: ${known}. Add it with --repos, or fix the --stack entry.`
+            )
+        }
+        if (splitParticipant(child).repo !== splitParticipant(parent).repo) {
+            throw new Error(
+                `--stack ${child}=${parent} stacks across repositories — a branch can only stack on a sibling of the same repo.`
+            )
+        }
+    }
+
+    // The merged child→parent map: the edges already stored (an in-scope base is
+    // a sibling edge — stackParent filters out remote-ref bases) overlaid with
+    // the new specs, which WIN (an explicit --stack re-points an existing edge).
+    // A cycle is detected over this whole graph so a ring split across two runs
+    // is still caught.
+    const edges: Record<string, string> = {}
+    for (const name of scope) {
+        const parent = stackParent(name, storedBranches, scope)
+        if (parent !== undefined) {
+            edges[name] = parent
+        }
+    }
+    for (const [child, parent] of Object.entries(specs)) {
+        edges[child] = parent
+    }
+    // Walk parent pointers from each child; a node revisited on the same walk is
+    // a cycle. The visited path is reported so the operator sees the ring.
+    for (const start of Object.keys(edges)) {
+        const seen: string[] = []
+        let node: string | undefined = start
+        while (node !== undefined) {
+            if (seen.includes(node)) {
+                seen.push(node)
+                throw new Error(
+                    `--stack would create a cycle: ${seen.join(" → ")}.`
+                )
+            }
+            seen.push(node)
+            node = edges[node]
         }
     }
 }

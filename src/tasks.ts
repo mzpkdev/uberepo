@@ -121,6 +121,25 @@ export const baseFor = (
     branches?: Record<string, { base?: string }>
 ): string | undefined => branches?.[name]?.base
 
+// The parent participant a stacked branch sits on, or undefined when the base is
+// a remote ref (e.g. `develop`) or unset. A base VALUE that names another
+// participant in the task's declared scope is a stack edge; anything else is not.
+// Pure — `scope` is the task's participant set (note.repos). Validation guarantees
+// a written stack base is same-repo + in-scope, so an in-scope base is a sibling.
+// This is the SOLE classifier every consumer (ship's base translation, sync's
+// flatten guard, footprint's comparison base) routes a participant's stored base
+// through to tell "stack on a sibling" from "rebase/PR against a remote ref": a
+// sibling token is never a git ref, so handing it to git would crash — the
+// callers translate it to the parent's branch name instead (branchFor).
+export const stackParent = (
+    name: string,
+    branches: Record<string, { base?: string }> | undefined,
+    scope: string[]
+): string | undefined => {
+    const base = baseFor(name, branches)
+    return base !== undefined && scope.includes(base) ? base : undefined
+}
+
 // The per-task durable note: <root>/tasks/<task>/ubertask.yml — a sibling of the
 // per-repo worktree dirs (NOT inside any worktree, NOT one-per-repo). Holds the
 // "why" git can't regenerate; open seeds it, status surfaces its freshness.

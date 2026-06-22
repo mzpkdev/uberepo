@@ -276,6 +276,7 @@ describe("ship command", () => {
         repos: {
             name: string
             branch: string
+            base?: string
             pushed: boolean
             pr?: { number: number; url: string; action: string }
             status: string
@@ -338,6 +339,7 @@ describe("ship command", () => {
             {
                 name: "api",
                 branch: "task/alpha",
+                base: "main",
                 pushed: false,
                 status: "skipped",
                 reason: "nothing to ship"
@@ -787,6 +789,7 @@ describe("ship command", () => {
             {
                 name: "api",
                 branch: "task/alpha",
+                base: "main",
                 pushed: true,
                 pr: {
                     number: 77,
@@ -844,6 +847,7 @@ describe("ship command", () => {
                 {
                     name: "api",
                     branch: "task/alpha",
+                    base: "main",
                     pushed: false,
                     status: "skipped",
                     reason: "pre-ship hook failed"
@@ -1024,6 +1028,212 @@ describe("ship command", () => {
                     "task/alpha@add-feature"
                 )
             ).rejects.toThrow()
+        })
+    })
+
+    describe("stacked participants (a child PR based on a sibling)", () => {
+        // Open an aliased worktree on branch task/<task>@<alias>, branched off
+        // `from` (main for a root, the PARENT's branch for a stacked child).
+        const openAliasedFrom = async (
+            name: string,
+            task: string,
+            alias: string,
+            from: string
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                `task/${task}@${alias}`,
+                wt,
+                from
+            )
+            return wt
+        }
+
+        // The gh subcommand of a recorded call ("pr list" / "pr create").
+        const subOf = (c: { args: string[] }): string =>
+            `${c.args[0]} ${c.args[1] ?? ""}`.trim()
+
+        // Set up a parent (strings) + a child (logos) stacked on it: the child
+        // branches off the parent's branch and commits its own work, and the
+        // note declares the sibling edge (logos.base = autopilot@strings).
+        const stackedPair = async (): Promise<{
+            parentWt: string
+            childWt: string
+        }> => {
+            await makeSource("autopilot")
+            await register(["autopilot"])
+            const parentWt = await openAliasedFrom(
+                "autopilot",
+                "alpha",
+                "strings",
+                "main"
+            )
+            await commitWork(parentWt, "strings.txt")
+            // The child stacks ON the parent's branch — branched from it, with
+            // its own commit on top, so it is ahead of the PARENT (not flat
+            // against main).
+            const childWt = await openAliasedFrom(
+                "autopilot",
+                "alpha",
+                "logos",
+                "task/alpha@strings"
+            )
+            await commitWork(childWt, "logos.txt")
+            // The note: both participants in scope, the child's base = the
+            // parent's participant token (the stack edge open --stack writes).
+            await writeNote(
+                "alpha",
+                "goal: |\n  stacked\n\nrepos:\n  - autopilot@strings\n  - autopilot@logos\n\nbranches:\n  autopilot@logos:\n    name: task/alpha@logos\n    adopted: false\n    base: autopilot@strings\n"
+            )
+            return { parentWt, childWt }
+        }
+
+        it("opens the child PR against the PARENT's branch (not the remote default)", async () => {
+            await stackedPair()
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const json = await captureJson<ShipJson>(async () => {
+                await ship.run(argv())
+            })
+
+            // The child's gh create targets the parent branch, NOT main, and the
+            // branch name is passed verbatim (no origin/ strip).
+            const childCreate = gh.calls.find(
+                (c) =>
+                    subOf(c) === "pr create" &&
+                    c.cwd.endsWith("autopilot@logos")
+            )
+            expect(childCreate).toBeDefined()
+            expect(childCreate?.args).toEqual(
+                expect.arrayContaining([
+                    "--base",
+                    "task/alpha@strings",
+                    "--head",
+                    "task/alpha@logos"
+                ])
+            )
+            // The parent's PR still targets the remote default.
+            const parentCreate = gh.calls.find(
+                (c) =>
+                    subOf(c) === "pr create" &&
+                    c.cwd.endsWith("autopilot@strings")
+            )
+            expect(parentCreate?.args).toEqual(
+                expect.arrayContaining(["--base", "main"])
+            )
+            // The per-entry base is truthful: parent branch for the child, the
+            // remote default for the parent.
+            const byName = new Map(json.repos.map((r) => [r.name, r]))
+            expect(byName.get("autopilot@logos")?.base).toBe(
+                "task/alpha@strings"
+            )
+            expect(byName.get("autopilot@strings")?.base).toBe("main")
+            // The run-level base stays the ROOTS' base (never the child's edge).
+            expect(json.base).toBe("main")
+        })
+
+        it("pushes + creates the PARENT before the child (parent-first single pass)", async () => {
+            await stackedPair()
+            const gh = makeGh()
+            setGh(gh.run)
+
+            await captureJson<ShipJson>(async () => {
+                await ship.run(argv())
+            })
+
+            // The parent's create must be recorded BEFORE the child's create —
+            // the child's `--base task/alpha@strings` needs the parent branch on
+            // the remote, which only the parent's push (earlier in the pass)
+            // puts there.
+            const creates = gh.calls.filter((c) => subOf(c) === "pr create")
+            const parentIdx = creates.findIndex((c) =>
+                c.cwd.endsWith("autopilot@strings")
+            )
+            const childIdx = creates.findIndex((c) =>
+                c.cwd.endsWith("autopilot@logos")
+            )
+            expect(parentIdx).toBeGreaterThanOrEqual(0)
+            expect(childIdx).toBeGreaterThan(parentIdx)
+            // Both branches really reached the one shared upstream.
+            for (const branch of ["task/alpha@strings", "task/alpha@logos"]) {
+                expect(
+                    await sh(
+                        path.join(root, "upstream", "autopilot.git"),
+                        "rev-parse",
+                        branch
+                    )
+                ).toBeTruthy()
+            }
+        })
+
+        it("skips the child when its parent did NOT ship (parent not on remote)", async () => {
+            const { parentWt } = await stackedPair()
+            // Make the parent dirty so its pre-flight skips it (not shipped), and
+            // its branch never reaches the remote — the child must then skip.
+            await fsp.writeFile(
+                path.join(parentWt, "dirty.txt"),
+                "uncommitted\n"
+            )
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const json = await captureJson<ShipJson>(async () => {
+                await ship.run(argv())
+            })
+
+            const byName = new Map(json.repos.map((r) => [r.name, r]))
+            // Parent skipped for its dirty tree.
+            expect(byName.get("autopilot@strings")?.status).toBe("skipped")
+            expect(byName.get("autopilot@strings")?.reason).toBe(
+                "uncommitted changes"
+            )
+            // Child skipped because the parent branch isn't on the remote.
+            expect(byName.get("autopilot@logos")?.status).toBe("skipped")
+            expect(byName.get("autopilot@logos")?.reason).toBe(
+                "parent autopilot@strings not on remote — ship it first"
+            )
+            // Neither branch reached the remote, and the child's PR was never
+            // created (no create against a missing base).
+            await expect(
+                sh(
+                    path.join(root, "upstream", "autopilot.git"),
+                    "rev-parse",
+                    "task/alpha@logos"
+                )
+            ).rejects.toThrow()
+            expect(gh.calls.some((c) => subOf(c) === "pr create")).toBe(false)
+        })
+
+        it("ships the child when its parent ALREADY exists on the remote (prior ship)", async () => {
+            const { parentWt, childWt } = await stackedPair()
+            // Simulate the parent having been shipped on an earlier run: push its
+            // branch to the shared upstream directly, then NARROW this run to the
+            // child only (so the parent isn't a target now).
+            await sh(parentWt, "push", "origin", "task/alpha@strings")
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const json = await captureJson<ShipJson>(async () => {
+                await ship.run(argv({ repos: ["autopilot@logos"] }))
+            })
+
+            // The child shipped: its parent branch was already on origin, so the
+            // dependency guard let it through even though the parent wasn't a
+            // target this run.
+            expect(json.repos.map((r) => [r.name, r.status])).toEqual([
+                ["autopilot@logos", "shipped"]
+            ])
+            const childCreate = gh.calls.find((c) => subOf(c) === "pr create")
+            expect(childCreate?.args).toEqual(
+                expect.arrayContaining(["--base", "task/alpha@strings"])
+            )
+            void childWt
         })
     })
 })

@@ -12,6 +12,7 @@ import {
     branchFor,
     partitionScope,
     readNote,
+    stackParent,
     type TaskNote,
     taskParticipants,
     worktreePath
@@ -214,6 +215,28 @@ export default defineCommand({
                 argv.from ??
                 baseFor(name, note?.branches) ??
                 (await repo.remoteDefault())
+
+            // A STACKED child must NEVER be rebased here: its base is a sibling
+            // participant's branch, and rebasing it onto remoteDefault (or a
+            // blanket --from) would FLATTEN the stack onto main, destroying the
+            // edge. Until Phase 3 adds a real `--onto <parent>` restack, the safe
+            // interim is to skip it — leaving its tip untouched — and say so. The
+            // sibling token its base names is also not a git ref, so this guard
+            // additionally keeps `resolved` (which would be that token) from ever
+            // reaching git. Roots and non-stacked participants fall straight
+            // through to the rebase below, exactly as before.
+            if (stackParent(name, note?.branches, scope) !== undefined) {
+                repos.push({
+                    name,
+                    status: "skipped",
+                    reason: "stacked (restack pending)"
+                })
+                terminal.log(
+                    `${name}: stacked on a sibling — skipping (restack pending)`
+                )
+                continue
+            }
+
             if (!resolved) {
                 repos.push({
                     name,
@@ -406,6 +429,21 @@ const forecast = async (
             from ??
             baseFor(name, note?.branches) ??
             (await repo.remoteDefault())
+
+        // A STACKED child is reported as skipped here too, for the same reason
+        // the real sync skips it: the real run won't rebase it (no flatten),
+        // and its base is a sibling token, not a ref merge-tree could judge.
+        // The forecast must mirror what sync would actually do — Phase 3 will
+        // forecast the restack instead.
+        if (stackParent(name, note?.branches, scope) !== undefined) {
+            repos.push({
+                name,
+                status: "skipped",
+                reason: "stacked (restack pending)"
+            })
+            continue
+        }
+
         if (!resolved) {
             repos.push({
                 name,

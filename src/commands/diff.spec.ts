@@ -495,4 +495,55 @@ describe("diff command", () => {
         expect(parsed.repos[0].ahead).toBe(1)
         expect(parsed.repos[1].ahead).toBe(0)
     })
+
+    it("a STACKED child's ahead-count is vs the PARENT branch, not main (no crash)", async () => {
+        await makeSource("web")
+        await register(["web"])
+        // strings is a root with one commit; logos stacks on it (branched off
+        // the parent branch) with its OWN single commit on top.
+        const stringsWt = path.join(root, "tasks", "alpha", "web@strings")
+        const source = path.join(root, "source", "web")
+        await sh(
+            source,
+            "worktree",
+            "add",
+            "-b",
+            "task/alpha@strings",
+            stringsWt,
+            "main"
+        )
+        await commit(stringsWt, "strings.txt", "s\n", "strings work")
+        const logosWt = path.join(root, "tasks", "alpha", "web@logos")
+        await sh(
+            source,
+            "worktree",
+            "add",
+            "-b",
+            "task/alpha@logos",
+            logosWt,
+            "task/alpha@strings"
+        )
+        await commit(logosWt, "logos.txt", "l\n", "logos work")
+        // The note declares the sibling edge logos.base = web@strings.
+        await fsp.mkdir(path.join(root, "tasks", "alpha"), { recursive: true })
+        await fsp.writeFile(
+            path.join(root, "tasks", "alpha", "ubertask.yml"),
+            "goal: |\n  stacked\n\nrepos:\n  - web@strings\n  - web@logos\n\nbranches:\n  web@logos:\n    name: task/alpha@logos\n    adopted: false\n    base: web@strings\n"
+        )
+
+        const parsed = await captureJson<DiffJson>(async () => {
+            await diff.run({ task: "alpha" })
+        })
+
+        const byName = new Map(parsed.repos.map((r) => [r.name, r]))
+        const logos = byName.get("web@logos")
+        // The child is measured against its PARENT branch: exactly its own one
+        // commit ahead (NOT 2, which is what comparing against main would give),
+        // and it did NOT crash on the `web@strings` sibling token.
+        expect(logos?.status).toBe("ok")
+        expect(logos?.ahead).toBe(1)
+        expect(logos?.commits?.map((c) => c.subject)).toEqual(["logos work"])
+        // The root is measured against origin's default, as before.
+        expect(byName.get("web@strings")?.ahead).toBe(1)
+    })
 })

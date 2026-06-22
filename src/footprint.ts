@@ -5,6 +5,7 @@ import {
     branchFor,
     partitionScope,
     readNote,
+    stackParent,
     taskParticipants,
     worktreePath
 } from "@/tasks"
@@ -110,11 +111,20 @@ export const taskFootprint = async (
         // above); several participants of one repo all read it.
         const repo = git(sourceByName.get(name) as string)
 
-        // The comparison base: the persisted per-participant base (an adopted
-        // branch's PR base) when recorded, else the same ref sync rebases onto
-        // by default — origin's default branch, resolved from the local
-        // origin/HEAD symref (e.g. origin/main).
-        const resolved = baseFor(name, branches) ?? (await repo.remoteDefault())
+        // The comparison base. A STACKED child compares against its PARENT's
+        // branch, so its ahead-count/diffstat measure the child's own commits
+        // beyond the sibling it stacks on (correct + meaningful) — and, crucially,
+        // the sibling token its base names is NOT a git ref, so handing it to git
+        // would crash; branchFor translates it to the parent's branch name. A
+        // root resolves as before: its persisted per-participant base (an adopted
+        // branch's PR base) when recorded, else origin's default branch from the
+        // local origin/HEAD symref. (Tree/indent rendering of the stack is Phase
+        // 4 — this is only the correctness guard.)
+        const parentToken = stackParent(name, branches, scope)
+        const resolved =
+            parentToken !== undefined
+                ? branchFor(task, parentToken, branches)
+                : (baseFor(name, branches) ?? (await repo.remoteDefault()))
         if (!resolved) {
             repos.push({
                 name,

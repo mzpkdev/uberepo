@@ -3,12 +3,14 @@ import {
     type OpenInput,
     type OpenOutcomes,
     parseBranchSpecs,
+    parseStackSpecs,
     planOpen,
     resolveBranchMode,
     summarize,
     validateBranchScope,
     validateName,
     validateParticipants,
+    validateStackSpecs,
     validateSuppliedRepos
 } from "@/open-plan"
 
@@ -742,5 +744,128 @@ describe("resolveBranchMode — the adopt-or-create decision", () => {
             mode: "adopt",
             track: false
         })
+    })
+})
+
+describe("parseStackSpecs — the --stack child=parent edges", () => {
+    it("undefined → an empty map (no edges declared)", () => {
+        expect(parseStackSpecs(undefined)).toEqual({})
+    })
+
+    it("[] → an empty map", () => {
+        expect(parseStackSpecs([])).toEqual({})
+    })
+
+    it("collects each child=parent edge, keyed by the child", () => {
+        expect(
+            parseStackSpecs(["web@logos=web@strings", "web@api=web@logos"])
+        ).toEqual({
+            "web@logos": "web@strings",
+            "web@api": "web@logos"
+        })
+    })
+
+    it("splits on the FIRST = only (tokens never contain a second one anyway)", () => {
+        // Defensive: even an odd token splits cleanly into child/parent.
+        expect(parseStackSpecs(["a=b=c"])).toEqual({ a: "b=c" })
+    })
+
+    it("rejects a token with no =", () => {
+        expect(() => parseStackSpecs(["web@logos"])).toThrow("malformed")
+    })
+
+    it("rejects an empty side of =", () => {
+        expect(() => parseStackSpecs(["=parent"])).toThrow("malformed")
+        expect(() => parseStackSpecs(["child="])).toThrow("malformed")
+    })
+
+    it("rejects a duplicate child (a branch stacks on at most one parent)", () => {
+        expect(() =>
+            parseStackSpecs(["web@logos=web@strings", "web@logos=web@api"])
+        ).toThrow("two parents for web@logos")
+    })
+
+    it("rejects a self-edge (a branch cannot stack on itself)", () => {
+        expect(() => parseStackSpecs(["web@logos=web@logos"])).toThrow(
+            "stacks web@logos on itself"
+        )
+    })
+})
+
+describe("validateStackSpecs — scope, cross-repo, and cycle guards", () => {
+    const scope = ["web@strings", "web@logos", "web@api", "api"]
+
+    it("passes a same-repo edge whose parent is in scope", () => {
+        expect(() =>
+            validateStackSpecs({ "web@logos": "web@strings" }, scope, undefined)
+        ).not.toThrow()
+    })
+
+    it("throws when the parent is outside the task's scope", () => {
+        // The landmine: a parent that is in scope but NOT a target this run must
+        // still pass — so the check is against scope, never the run's targets. A
+        // parent genuinely absent from scope is the real error.
+        expect(() =>
+            validateStackSpecs({ "web@logos": "web@ghost" }, scope, undefined)
+        ).toThrow("names a parent outside this task's scope")
+    })
+
+    it("checks the parent against SCOPE, not this run's targets (in-scope-but-not-opened parent passes)", () => {
+        // web@strings IS in scope (it may have been opened on a previous run);
+        // it need not be a target of THIS open for web@logos to stack on it.
+        expect(() =>
+            validateStackSpecs({ "web@logos": "web@strings" }, scope, undefined)
+        ).not.toThrow()
+    })
+
+    it("throws on a cross-repo edge (a branch only stacks within one repo)", () => {
+        expect(() =>
+            validateStackSpecs({ "web@logos": "api" }, scope, undefined)
+        ).toThrow("stacks across repositories")
+    })
+
+    it("throws on a direct cycle between two new specs", () => {
+        expect(() =>
+            validateStackSpecs(
+                { "web@logos": "web@strings", "web@strings": "web@logos" },
+                scope,
+                undefined
+            )
+        ).toThrow("would create a cycle")
+    })
+
+    it("catches a cycle that spans a stored edge plus a new spec", () => {
+        // Stored: web@strings stacks on web@logos. New: web@logos stacks on
+        // web@strings — closing the ring. The merged graph must catch it even
+        // though neither run alone declared a cycle.
+        const stored = { "web@strings": { base: "web@logos" } }
+        expect(() =>
+            validateStackSpecs({ "web@logos": "web@strings" }, scope, stored)
+        ).toThrow("would create a cycle")
+    })
+
+    it("ignores a stored REMOTE-REF base when deriving edges (no false cycle)", () => {
+        // web@strings's stored base is `develop` — a remote ref, NOT a sibling —
+        // so it is not an edge and cannot participate in a cycle. web@logos
+        // stacking on web@strings is a clean two-node chain.
+        const stored = { "web@strings": { base: "develop" } }
+        expect(() =>
+            validateStackSpecs({ "web@logos": "web@strings" }, scope, stored)
+        ).not.toThrow()
+    })
+
+    it("an explicit spec re-points (wins over) a stored edge for the same child", () => {
+        // Stored: web@logos → web@strings. New: web@logos → web@api. The new
+        // edge replaces the stored one, so there is no cycle and no conflict.
+        const stored = { "web@logos": { base: "web@strings" } }
+        expect(() =>
+            validateStackSpecs({ "web@logos": "web@api" }, scope, stored)
+        ).not.toThrow()
+    })
+
+    it("reports (none in scope) when the scope is empty", () => {
+        expect(() =>
+            validateStackSpecs({ "web@logos": "web@strings" }, [], undefined)
+        ).toThrow("in scope: (none in scope)")
     })
 })
