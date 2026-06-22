@@ -7,6 +7,7 @@ import {
     taskFootprint
 } from "@/footprint"
 import { currentGh, ghAvailable, prView } from "@/forge"
+import { rowBase, STACK_BULLET_CHILD, STACK_BULLET_ROOT } from "@/stack"
 import { age, readNote, type TaskNote, worktreePath } from "@/tasks"
 import type { UbertaskItem } from "@/ubertask"
 
@@ -103,11 +104,18 @@ export default defineCommand({
             )
         }
 
+        // --json carries the structure the printed tree shows: each entry's
+        // `parent` (already on the footprint) and `base` — the ref THIS row
+        // compares against (a stacked child's parent branch, else the run's
+        // base) — alongside the PR enrichment.
         terminal.json({
             task: argv.task,
             base: footprint.base,
             ...(note ? { note } : {}),
-            repos
+            repos: repos.map((repo) => ({
+                ...repo,
+                base: rowBase(repo, footprint.repos, footprint.base)
+            }))
         })
         print(argv.task, footprint.base, note, repos, lookup)
     }
@@ -165,9 +173,16 @@ const print = (
     lines.push(base === "" ? "## Repos" : `## Repos (vs ${base})`, "")
     const width = repos.reduce((max, r) => Math.max(max, r.name.length), 0)
     for (const repo of repos) {
+        // A stacked child nests one level under its parent bullet (the repos
+        // are ordered parent-first); a root keeps the original `- ` bullet, so
+        // an unstacked task's markdown is byte-identical to before. Its commit
+        // sub-bullets indent one step further to stay under the child line.
+        const child = repo.parent !== undefined
+        const bullet = child ? STACK_BULLET_CHILD : STACK_BULLET_ROOT
+        const commitBullet = child ? "    - " : "  - "
         if (repo.status === "skipped") {
             lines.push(
-                `- ${repo.name.padEnd(width)}  ${repo.branch}  skipped — ${repo.reason}`
+                `${bullet}${repo.name.padEnd(width)}  ${repo.branch}  skipped — ${repo.reason}`
             )
             continue
         }
@@ -191,9 +206,11 @@ const print = (
             )
         }
         columns.push(repo.dirty ? "dirty" : "clean")
-        lines.push(`- ${columns.join("  ")}`)
+        lines.push(`${bullet}${columns.join("  ")}`)
         for (const commit of repo.commits) {
-            lines.push(`  - ${commit.sha.slice(0, 7)} ${commit.subject}`)
+            lines.push(
+                `${commitBullet}${commit.sha.slice(0, 7)} ${commit.subject}`
+            )
         }
     }
 

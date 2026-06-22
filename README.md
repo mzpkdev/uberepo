@@ -63,6 +63,30 @@ deep). Both branches push from the one shared `source/web` clone; `ship` opens a
 PR per branch, `close` tears down both worktrees and keeps the clone. A bare
 `web` (no `@`) is unchanged.
 
+### Stacked PRs
+
+Those two branches are often a *stack*: `logos` builds on `strings`, so its PR
+should target `strings`'s branch, not `main`. Declare the edge once, on `open`:
+```bash
+uberepo open big-rename --stack web@logos=web@strings
+```
+That records `web@logos`'s base as the sibling `web@strings` in the note (a
+stack edge, not a remote ref). From then on the whole lifecycle keeps the stack
+honest:
+- **`ship`** opens `web@logos`'s PR against `task/big-rename@strings` (the
+  parent's branch), and pushes the parent first — a child whose parent isn't on
+  the remote yet is skipped with *"parent not on remote — ship it first"*.
+- **`sync`** rebases the forest bottom-up — parent first, then each child onto
+  its freshly-moved parent — so a rebase upstream ripples through the stack
+  without flattening it.
+- **`status`/`diff`/`context`** nest the child under its parent in a `└─` tree,
+  and `diff`/`context` measure the child's commits against the parent's branch,
+  not `main`.
+
+The edge must stay same-repo, in-scope, and acyclic — a cross-repo, out-of-scope,
+or cycle-forming `--stack` is rejected when you declare it. A participant with no
+`--stack` is an ordinary root, exactly as before.
+
 ## Why not a monorepo?
 
 Sometimes you can't merge the repos — separate owners, separate CI, separate deploy cadences — so überepo works with the ones you're stuck with, each keeping its own conventions and PR flow.
@@ -161,7 +185,7 @@ decisions:
 
 | Command | What it does |
 | --- | --- |
-| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`, `--branch`; repos scoped via `--repos` clone on demand. A `--repos repo@alias` token gives one repo a second branch in the task ([below](#more-than-one-branch-in-a-repo)). `--branch <repo>=<name>` (or a bare `--branch <name>` for all repos) **adopts** an existing branch instead of creating `task/<task>` — `close`/`prune` then keep that branch. |
+| `uberepo open <task>` | Branch + worktree in every repo. Takes `--goal`, `--repos`, `--from`, `--branch`, `--stack`; repos scoped via `--repos` clone on demand. A `--repos repo@alias` token gives one repo a second branch in the task ([below](#more-than-one-branch-in-a-repo)). `--branch <repo>=<name>` (or a bare `--branch <name>` for all repos) **adopts** an existing branch instead of creating `task/<task>` — `close`/`prune` then keep that branch. `--stack <child>=<parent>` stacks one participant's branch on a sibling's, so `ship`/`sync` target and rebase it against the parent ([below](#stacked-prs)). |
 | `uberepo status [<task>]` | Show open tasks, their branches, and clean/dirty state. |
 | `uberepo diff <task>` | Show the task's footprint: commits ahead + diffstat per repo. |
 | `uberepo exec <task> -- <cmd>...` | Run one command inside every one of the task's worktrees. `--repos` narrows it; `--bail` stops at the first failure. Exits non-zero if any repo's command did. |

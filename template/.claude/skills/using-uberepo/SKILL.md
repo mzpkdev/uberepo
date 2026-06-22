@@ -53,6 +53,11 @@ across them at once and switch tasks by switching directories — not `git check
      is cloned on demand first; an unscoped open never clones on its own. An entry is
      `repo` or `repo@alias` — the alias form opens another participant (its own worktree
      + `task/<task>@<alias>` branch) in the same repo. Idempotent.
+   - **Stacked PRs:** `uberepo open <task> --stack <child>=<parent>` stacks one
+     participant's branch on a sibling's (same repo, in scope, acyclic — rejected
+     otherwise). `ship` then opens the child's PR against the parent's branch
+     (parents first), and `sync` restacks the forest bottom-up so the stack stays
+     correct across rebases; `status`/`diff`/`context` show it as a `└─` tree.
    - Edit in `tasks/<task>/<name>/`. **Commit and push per repo yourself** —
      uberepo does NOT commit or push. Follow each repo's own AGENTS.md/README.
    - `uberepo exec <task> -- <cmd>...` — run one command (tests, a lint script,

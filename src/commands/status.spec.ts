@@ -587,4 +587,143 @@ describe("status command", () => {
             ])
         })
     })
+
+    describe("stacked participants (a branch stacked on a sibling)", () => {
+        // Open an aliased worktree on branch task/<task>@<alias>, off `base`
+        // (another branch, to stack; defaults to main for a root).
+        const openAliased = async (
+            name: string,
+            task: string,
+            alias: string,
+            base = "main"
+        ): Promise<string> => {
+            const source = path.join(root, "source", name)
+            const wt = path.join(root, "tasks", task, `${name}@${alias}`)
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                `task/${task}@${alias}`,
+                wt,
+                base
+            )
+            return wt
+        }
+
+        // A note declaring web@logos stacked on web@strings (the sibling edge).
+        const stackNote = (task: string): Promise<string> =>
+            writeNote(
+                task,
+                "goal: |\n  stacked\n\nrepos:\n  - web@strings\n  - web@logos\n\nbranches:\n  web@logos:\n    name: task/" +
+                    task +
+                    "@logos\n    adopted: false\n    base: web@strings\n"
+            )
+
+        it("indents the stacked child under its parent with a └─ connector", async () => {
+            await makeSource("web")
+            await register(["web"])
+            await openAliased("web", "alpha", "strings")
+            await openAliased("web", "alpha", "logos", "task/alpha@strings")
+            await stackNote("alpha")
+
+            const logs = await captureLogs(async () => {
+                await status.run({ task: "alpha" })
+            })
+
+            // Folder sort puts logos before strings, but the parent must print
+            // first; the child then hangs off it with the connector, while the
+            // parent keeps the plain two-space indent. Repo rows are the ones
+            // carrying a branch (`task/...`) — distinct from the goal/scope
+            // lines, which also mention the participant tokens.
+            const repos = logs.filter((l) => l.includes("task/alpha@"))
+            const parent = repos.find((l) => l.includes("web@strings"))
+            const childRow = repos.find((l) => l.includes("web@logos"))
+            expect(parent?.startsWith("  web@strings")).toBe(true)
+            expect(childRow?.startsWith("  └─ web@logos")).toBe(true)
+            expect(logs.indexOf(parent as string)).toBeLessThan(
+                logs.indexOf(childRow as string)
+            )
+        })
+
+        it("adds parent/base to the stacked child's JSON entry, parent before child", async () => {
+            await makeSource("web")
+            await register(["web"])
+            await openAliased("web", "alpha", "strings")
+            await openAliased("web", "alpha", "logos", "task/alpha@strings")
+            await stackNote("alpha")
+
+            const parsed = JSON.parse(
+                (
+                    await captureJson(async () => {
+                        await status.run({ task: "alpha" })
+                    })
+                ).join("")
+            ) as Task[]
+
+            // Topological order in the payload: parent (strings) before its
+            // child (logos), despite logos sorting first by folder name.
+            expect(parsed[0].repos.map((r) => r.name)).toEqual([
+                "web@strings",
+                "web@logos"
+            ])
+            // The root carries no parent/base — just the base `{ name, branch,
+            // dirty }` shape.
+            expect(parsed[0].repos[0]).toEqual({
+                name: "web@strings",
+                branch: "task/alpha@strings",
+                dirty: false
+            })
+            // The child gains `parent` (the sibling token) and `base` (that
+            // sibling's branch — the ref it's stacked on).
+            expect(parsed[0].repos[1]).toEqual({
+                name: "web@logos",
+                branch: "task/alpha@logos",
+                dirty: false,
+                parent: "web@strings",
+                base: "task/alpha@strings"
+            })
+        })
+
+        it("a NON-stacked task is byte-identical — no connector, no parent/base (regression guard)", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            await openWorktree("api", "alpha")
+            await openWorktree("web", "alpha")
+            // A scoped note WITHOUT any stack edge — the tree must stay invisible.
+            await writeNote(
+                "alpha",
+                "goal: |\n  g\n\nrepos:\n  - api\n  - web\n"
+            )
+
+            const logs = await captureLogs(async () => {
+                await status.run({ task: "alpha" })
+            })
+            // No connector anywhere; every repo row (the ones carrying a
+            // branch, not the goal/scope lines) keeps the plain indent.
+            expect(logs.some((l) => l.includes("└─"))).toBe(false)
+            const repos = logs.filter((l) => l.includes("task/alpha"))
+            expect(
+                repos.find((l) => l.includes("api"))?.startsWith("  api")
+            ).toBe(true)
+            expect(
+                repos.find((l) => l.includes("web"))?.startsWith("  web")
+            ).toBe(true)
+
+            const parsed = JSON.parse(
+                (
+                    await captureJson(async () => {
+                        await status.run({ task: "alpha" })
+                    })
+                ).join("")
+            ) as Task[]
+            // Every entry keeps the exact `{ name, branch, dirty }` shape — no
+            // parent/base key crept in.
+            expect(parsed[0].repos).toEqual([
+                { name: "api", branch: "task/alpha", dirty: false },
+                { name: "web", branch: "task/alpha", dirty: false }
+            ])
+        })
+    })
 })

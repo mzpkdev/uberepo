@@ -27,6 +27,8 @@ type ContextJson = {
     repos: {
         name: string
         branch: string
+        parent?: string
+        base: string
         status: "ok" | "skipped"
         reason?: string
         ahead?: number
@@ -309,6 +311,8 @@ describe("context command", () => {
                 {
                     name: "api",
                     branch: "task/alpha",
+                    // A root repo's per-row base is the run base.
+                    base: "origin/main",
                     ahead: 1,
                     dirty: true,
                     files: 1,
@@ -501,6 +505,8 @@ describe("context command", () => {
         expect(parsed.repos[1]).toEqual({
             name: "web",
             branch: "task/alpha",
+            // A skipped root still carries the run base (api resolved it).
+            base: "origin/main",
             status: "skipped",
             reason: "no worktree"
         })
@@ -536,5 +542,128 @@ describe("context command", () => {
         expect(warnings.join("\n")).toContain("ghost")
         // Nothing to look up — gh was never touched.
         expect(gh.calls).toEqual([])
+    })
+
+    describe("stacked participants (a child PR on a sibling's branch)", () => {
+        // Set up a two-deep stack in one repo: `web@strings` (root, off main)
+        // and `web@logos` (child, branched off the parent branch), with the
+        // note declaring logos.base = web@strings. Returns nothing — the task
+        // `alpha` is left fully staged on disk.
+        const openStack = async (): Promise<void> => {
+            await makeSource("web")
+            await register(["web"])
+            const source = path.join(root, "source", "web")
+            const stringsWt = path.join(root, "tasks", "alpha", "web@strings")
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                "task/alpha@strings",
+                stringsWt,
+                "main"
+            )
+            await commit(stringsWt, "strings.txt", "s\n", "strings work")
+            const logosWt = path.join(root, "tasks", "alpha", "web@logos")
+            await sh(
+                source,
+                "worktree",
+                "add",
+                "-b",
+                "task/alpha@logos",
+                logosWt,
+                "task/alpha@strings"
+            )
+            await commit(logosWt, "logos.txt", "l\n", "logos work")
+            await fsp.mkdir(path.join(root, "tasks", "alpha"), {
+                recursive: true
+            })
+            await fsp.writeFile(
+                path.join(root, "tasks", "alpha", "ubertask.yml"),
+                "goal: |\n  stacked\n\nrepos:\n  - web@strings\n  - web@logos\n\nbranches:\n  web@logos:\n    name: task/alpha@logos\n    adopted: false\n    base: web@strings\n"
+            )
+        }
+
+        it("carries parent/base per entry in --json, the child measured against its parent", async () => {
+            await openStack()
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const parsed = await captureJson<ContextJson>(async () => {
+                await context.run({ task: "alpha" })
+            })
+
+            const byName = new Map(parsed.repos.map((r) => [r.name, r]))
+            // The child stacks on the sibling: `parent` is the token, `base` is
+            // the parent's branch (the ref its commits are measured beyond).
+            const logos = byName.get("web@logos")
+            expect(logos?.parent).toBe("web@strings")
+            expect(logos?.base).toBe("task/alpha@strings")
+            expect(logos?.ahead).toBe(1)
+            // The root carries no parent, and its per-row base is the run base.
+            const strings = byName.get("web@strings")
+            expect(strings?.parent).toBeUndefined()
+            expect(strings?.base).toBe("origin/main")
+            // Parent precedes child in the array (topological order).
+            expect(parsed.repos.map((r) => r.name)).toEqual([
+                "web@strings",
+                "web@logos"
+            ])
+        })
+
+        it("nests the child bullet under its parent in the markdown handoff", async () => {
+            await openStack()
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const { logs } = await captureOutput(async () => {
+                await context.run({ task: "alpha" })
+            })
+
+            // The parent is a top-level `- ` bullet; the child nests one level
+            // under it (`  - `), and its commit sub-bullet indents one further.
+            const parent = logs.find((l) => l.includes("web@strings"))
+            const childRow = logs.find((l) => l.includes("web@logos"))
+            expect(parent?.startsWith("- web@strings")).toBe(true)
+            expect(childRow?.startsWith("  - web@logos")).toBe(true)
+            expect(
+                logs.some((l) => l === "    - " || l.startsWith("    - "))
+            ).toBe(true)
+            expect(logs.indexOf(parent as string)).toBeLessThan(
+                logs.indexOf(childRow as string)
+            )
+        })
+
+        it("a NON-stacked task's markdown is byte-identical — flat `- ` bullets (regression guard)", async () => {
+            await makeSource("api")
+            await makeSource("web")
+            await register(["api", "web"])
+            await openWorktree("api", "alpha")
+            await openWorktree("web", "alpha")
+            const gh = makeGh()
+            setGh(gh.run)
+
+            const { logs } = await captureOutput(async () => {
+                await context.run({ task: "alpha" })
+            })
+
+            // Every repo line is a flat top-level bullet; no nested `  - ` repo
+            // line, and nothing carries a connector.
+            expect(
+                logs.find((l) => l.includes("api"))?.startsWith("- api")
+            ).toBe(true)
+            expect(
+                logs.find((l) => l.includes("web"))?.startsWith("- web")
+            ).toBe(true)
+            expect(logs.some((l) => l.includes("└─"))).toBe(false)
+
+            const parsed = await captureJson<ContextJson>(async () => {
+                await context.run({ task: "alpha" })
+            })
+            expect(parsed.repos.every((r) => r.parent === undefined)).toBe(true)
+            expect(parsed.repos.every((r) => r.base === "origin/main")).toBe(
+                true
+            )
+        })
     })
 })

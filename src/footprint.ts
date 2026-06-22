@@ -5,6 +5,7 @@ import {
     branchFor,
     partitionScope,
     readNote,
+    stackOrder,
     stackParent,
     taskParticipants,
     worktreePath
@@ -25,10 +26,15 @@ export type FootprintCommit = {
 // One repo's slice of the task's footprint, the "ok" arm: the commits ahead
 // of the merge-base with the comparison base, the diffstat over that same
 // range, and whether the worktree holds uncommitted changes (which are NOT in
-// the diff).
+// the diff). `parent` is the stack edge made visible: the in-scope sibling
+// participant token this entry stacks ON (its `base` names a sibling), or
+// omitted for a root. The printers nest a child under its `parent`; `base`
+// (always present) is the resolved comparison ref — a stacked child's is its
+// parent's branch, a root's is its remote default / persisted base.
 export type FootprintOk = {
     name: string
     branch: string
+    parent?: string
     ahead: number
     dirty: boolean
     files: number
@@ -40,10 +46,13 @@ export type FootprintOk = {
 
 // The "skipped" arm: nothing to compare, with `reason` mirroring the human
 // line — no worktree for the task, a vanished task branch, or an unresolvable
-// origin default.
+// origin default. `parent` is surfaced here too (the stack structure is a
+// property of the note, not of whether the repo could be read), so a skipped
+// child still nests under its parent in the tree.
 export type FootprintSkipped = {
     name: string
     branch: string
+    parent?: string
     status: "skipped"
     reason: string
 }
@@ -90,7 +99,18 @@ export const taskFootprint = async (
     const scope = note?.repos ?? []
     const { inScope, strays } = partitionScope(present, scope)
     const missing = scope.filter((name) => !present.includes(name))
-    const targets = [...new Set([...inScope, ...missing])].sort()
+    // Topological order: every stack PARENT lands before its children, so the
+    // `repos` array (and thus diff/context's --json and their printed tree)
+    // reads root-first. A missing-but-in-scope parent is itself a target (it
+    // gets a skipped entry), so it still precedes its present child. With NO
+    // stack edges stackOrder is a no-op that preserves the input order, so a
+    // non-stacked task's array stays byte-identical to the old `.sort()` — the
+    // sort feeds stackOrder, which only ever reshuffles to honour parent→child.
+    const targets = stackOrder(
+        [...new Set([...inScope, ...missing])].sort(),
+        branches,
+        scope
+    )
 
     let base = ""
     const repos: FootprintRepo[] = []
@@ -98,10 +118,20 @@ export const taskFootprint = async (
         const dest = worktreePath(root, task, name)
         // This participant's branch (adopted/--branch, else its default).
         const branch = branchFor(task, name, branches)
+        // The stack edge, surfaced on EVERY arm: the in-scope sibling this
+        // participant stacks on (its `base` names a sibling), or undefined for a
+        // root. The printers nest a child under it; it rides even a skipped
+        // entry because the structure is the note's, not the read's. Spread as
+        // `...parent(parentToken)` so the key is absent (not undefined) for a
+        // root, matching the optional-field JSON contract.
+        const parentToken = stackParent(name, branches, scope)
+        const parent = (token: string | undefined) =>
+            token !== undefined ? { parent: token } : {}
         if (!present.includes(name)) {
             repos.push({
                 name,
                 branch,
+                ...parent(parentToken),
                 status: "skipped",
                 reason: "no worktree"
             })
@@ -118,9 +148,8 @@ export const taskFootprint = async (
         // would crash; branchFor translates it to the parent's branch name. A
         // root resolves as before: its persisted per-participant base (an adopted
         // branch's PR base) when recorded, else origin's default branch from the
-        // local origin/HEAD symref. (Tree/indent rendering of the stack is Phase
-        // 4 — this is only the correctness guard.)
-        const parentToken = stackParent(name, branches, scope)
+        // local origin/HEAD symref. (`parentToken` — the stack edge itself — is
+        // computed once above and surfaced on every entry for the tree.)
         const resolved =
             parentToken !== undefined
                 ? branchFor(task, parentToken, branches)
@@ -129,6 +158,7 @@ export const taskFootprint = async (
             repos.push({
                 name,
                 branch,
+                ...parent(parentToken),
                 status: "skipped",
                 reason: "cannot resolve origin's default branch"
             })
@@ -145,6 +175,7 @@ export const taskFootprint = async (
             repos.push({
                 name,
                 branch,
+                ...parent(parentToken),
                 status: "skipped",
                 reason: "branch missing"
             })
@@ -158,6 +189,7 @@ export const taskFootprint = async (
             repos.push({
                 name,
                 branch,
+                ...parent(parentToken),
                 ahead: commits.length,
                 dirty,
                 files: stat.files,
@@ -173,6 +205,7 @@ export const taskFootprint = async (
             repos.push({
                 name,
                 branch,
+                ...parent(parentToken),
                 status: "skipped",
                 reason: error instanceof Error ? error.message : String(error)
             })

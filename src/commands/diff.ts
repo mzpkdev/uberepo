@@ -2,6 +2,7 @@ import { defineCommand, terminal } from "cmdore"
 import { task } from "@/arguments/task"
 import { Config } from "@/config"
 import { type FootprintRepo, taskFootprint } from "@/footprint"
+import { rowBase, STACK_CHILD, STACK_INDENT } from "@/stack"
 
 export default defineCommand({
     name: "diff",
@@ -15,7 +16,8 @@ export default defineCommand({
         // The shared per-repo computation (footprint.ts, also behind
         // `context`): per repo, the commits ahead of the merge-base with the
         // comparison base, the diffstat over that range, and the dirty flag.
-        // Read-only by design: no fetch, no hooks, no carry.
+        // Already in topological (parent-before-child) order. Read-only by
+        // design: no fetch, no hooks, no carry.
         const { base, repos, strays } = await taskFootprint(
             config,
             root,
@@ -33,10 +35,25 @@ export default defineCommand({
             return
         }
 
-        terminal.json({ task: argv.task, base, repos })
+        // --json carries the structure the printed tree shows: each entry's
+        // `parent` (already on the footprint) and `base` — the ref THIS row
+        // compares against (a stacked child's parent branch, else the run's
+        // base). The footprint entries already hold `parent`; rowBase fills the
+        // per-row `base` from the sibling branches so a consumer needn't
+        // recompute it.
+        terminal.json({ task: argv.task, base, repos: withBase(base, repos) })
         print(argv.task, base, repos)
     }
 })
+
+// Stamp each entry with the per-row comparison `base` (the parent's branch for
+// a stacked child, else the run base). Additive: the array order and every
+// existing field are untouched — only the `base` key is added per entry.
+const withBase = (
+    base: string,
+    repos: FootprintRepo[]
+): (FootprintRepo & { base: string })[] =>
+    repos.map((repo) => ({ ...repo, base: rowBase(repo, repos, base) }))
 
 // Print the task heading ("<task>  vs <base>" once a base resolved) followed
 // by one indented, column-aligned line per repo — "<name>  <branch>  <N>
@@ -44,14 +61,20 @@ export default defineCommand({
 // subjects, each as "<sha7> <subject>". The diffstat chunk is omitted at 0
 // ahead (all zeros by construction), and a skipped repo collapses to
 // "<name>  skipped — <reason>". Dirty means uncommitted changes exist; they
-// are NOT in the numbers shown.
+// are NOT in the numbers shown. A STACKED child swaps its leading indent for a
+// `└─ ` connector, so its row hangs visibly off the parent printed just above
+// it (the footprint is already ordered parent-first); a non-stacked task has no
+// children, so every row keeps today's plain two-space indent byte-for-byte.
 const print = (task: string, base: string, repos: FootprintRepo[]): void => {
     terminal.log(base === "" ? task : `${task}  vs ${base}`)
     const width = repos.reduce((max, r) => Math.max(max, r.name.length), 0)
     for (const repo of repos) {
+        // A child's lead-in is the connector in place of the plain indent; a
+        // root keeps the original indent, so unstacked output is unchanged.
+        const lead = repo.parent !== undefined ? STACK_CHILD : STACK_INDENT
         if (repo.status === "skipped") {
             terminal.log(
-                `  ${repo.name.padEnd(width)}  skipped — ${repo.reason}`
+                `${lead}${repo.name.padEnd(width)}  skipped — ${repo.reason}`
             )
             continue
         }
@@ -67,7 +90,7 @@ const print = (task: string, base: string, repos: FootprintRepo[]): void => {
             columns.push(stat)
         }
         columns.push(state)
-        terminal.log(`  ${columns.join("  ")}`)
+        terminal.log(`${lead}${columns.join("  ")}`)
         for (const commit of repo.commits) {
             terminal.log(`    ${commit.sha.slice(0, 7)} ${commit.subject}`)
         }

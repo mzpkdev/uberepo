@@ -11,13 +11,18 @@ import { CONFIG_FILENAME } from "@/config"
 const exec = promisify(execFile)
 
 // The one stable JSON object diff emits. repos entries are a union: an "ok"
-// entry carries the numbers, a "skipped" entry only its reason.
+// entry carries the numbers, a "skipped" entry only its reason. Every entry
+// carries a per-row `base` (the ref it was compared against — a stacked child's
+// parent branch, else the run base) and, for a stacked child, a `parent` (the
+// sibling token it sits on).
 type DiffJson = {
     task: string
     base: string
     repos: {
         name: string
         branch: string
+        parent?: string
+        base: string
         status: "ok" | "skipped"
         reason?: string
         ahead?: number
@@ -275,6 +280,8 @@ describe("diff command", () => {
                 {
                     name: "api",
                     branch: "task/alpha",
+                    // A root repo's per-row base is the run base.
+                    base: "origin/main",
                     ahead: 1,
                     dirty: false,
                     files: 1,
@@ -323,6 +330,7 @@ describe("diff command", () => {
             {
                 name: "api",
                 branch: "task/alpha",
+                base: "origin/main",
                 ahead: 0,
                 dirty: false,
                 files: 0,
@@ -407,6 +415,8 @@ describe("diff command", () => {
         expect(parsed.repos[1]).toEqual({
             name: "web",
             branch: "task/alpha",
+            // A skipped root still carries the run base (api resolved it).
+            base: "origin/main",
             status: "skipped",
             reason: "no worktree"
         })
@@ -436,6 +446,8 @@ describe("diff command", () => {
             {
                 name: "api",
                 branch: "task/alpha",
+                // The base resolved before the branch-existence check failed.
+                base: "origin/main",
                 status: "skipped",
                 reason: "branch missing"
             }
@@ -457,6 +469,8 @@ describe("diff command", () => {
             {
                 name: "api",
                 branch: "task/alpha",
+                // The run base never resolved, so the per-row base is "" too.
+                base: "",
                 status: "skipped",
                 reason: "cannot resolve origin's default branch"
             }
@@ -545,5 +559,98 @@ describe("diff command", () => {
         expect(logos?.commits?.map((c) => c.subject)).toEqual(["logos work"])
         // The root is measured against origin's default, as before.
         expect(byName.get("web@strings")?.ahead).toBe(1)
+
+        // The structure is in the JSON: the child carries `parent` (the sibling
+        // token it stacks on) and a per-row `base` of the PARENT's branch; the
+        // root carries no `parent` and a per-row base of the run base.
+        expect(logos?.parent).toBe("web@strings")
+        expect(logos?.base).toBe("task/alpha@strings")
+        const strings = byName.get("web@strings")
+        expect(strings?.parent).toBeUndefined()
+        expect(strings?.base).toBe("origin/main")
+        // Topological order: the parent precedes the child in the array.
+        expect(parsed.repos.map((r) => r.name)).toEqual([
+            "web@strings",
+            "web@logos"
+        ])
+    })
+
+    it("renders the stack as a tree: the child row hangs off its parent with a └─ connector", async () => {
+        await makeSource("web")
+        await register(["web"])
+        const source = path.join(root, "source", "web")
+        const stringsWt = path.join(root, "tasks", "alpha", "web@strings")
+        await sh(
+            source,
+            "worktree",
+            "add",
+            "-b",
+            "task/alpha@strings",
+            stringsWt,
+            "main"
+        )
+        await commit(stringsWt, "strings.txt", "s\n", "strings work")
+        const logosWt = path.join(root, "tasks", "alpha", "web@logos")
+        await sh(
+            source,
+            "worktree",
+            "add",
+            "-b",
+            "task/alpha@logos",
+            logosWt,
+            "task/alpha@strings"
+        )
+        await commit(logosWt, "logos.txt", "l\n", "logos work")
+        await fsp.mkdir(path.join(root, "tasks", "alpha"), { recursive: true })
+        await fsp.writeFile(
+            path.join(root, "tasks", "alpha", "ubertask.yml"),
+            "goal: |\n  stacked\n\nrepos:\n  - web@strings\n  - web@logos\n\nbranches:\n  web@logos:\n    name: task/alpha@logos\n    adopted: false\n    base: web@strings\n"
+        )
+
+        const { logs } = await captureOutput(async () => {
+            await diff.run({ task: "alpha" })
+        })
+
+        // The parent row keeps the plain two-space indent; the child row swaps
+        // it for the `└─ ` connector, so it visibly hangs off the parent above.
+        const parent = logs.find((l) => l.includes("web@strings"))
+        const childRow = logs.find((l) => l.includes("web@logos"))
+        expect(parent?.startsWith("  web@strings")).toBe(true)
+        expect(childRow?.startsWith("  └─ web@logos")).toBe(true)
+        // The parent is printed before the child (root-first), so the connector
+        // reads correctly top-to-bottom.
+        expect(logs.indexOf(parent as string)).toBeLessThan(
+            logs.indexOf(childRow as string)
+        )
+    })
+
+    it("a NON-stacked task renders byte-identically — no connector, plain indent (regression guard)", async () => {
+        await makeSource("api")
+        await makeSource("web")
+        await register(["api", "web"])
+        await openWorktree("api", "alpha")
+        await openWorktree("web", "alpha")
+
+        const { logs } = await captureOutput(async () => {
+            await diff.run({ task: "alpha" })
+        })
+
+        // Every repo row keeps the original two-space indent; no `└─` anywhere.
+        expect(logs[0]).toBe("alpha  vs origin/main")
+        expect(logs.some((l) => l.includes("└─"))).toBe(false)
+        expect(logs.find((l) => l.includes("api"))?.startsWith("  api")).toBe(
+            true
+        )
+        expect(logs.find((l) => l.includes("web"))?.startsWith("  web")).toBe(
+            true
+        )
+
+        // And the JSON gains no `parent` key, with a per-row base of the run
+        // base — exactly a root entry.
+        const parsed = await captureJson<DiffJson>(async () => {
+            await diff.run({ task: "alpha" })
+        })
+        expect(parsed.repos.every((r) => r.parent === undefined)).toBe(true)
+        expect(parsed.repos.every((r) => r.base === "origin/main")).toBe(true)
     })
 })

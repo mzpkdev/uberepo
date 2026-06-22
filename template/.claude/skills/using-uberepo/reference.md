@@ -52,7 +52,11 @@ is against the last-fetched upstream state. A repo with no worktree or a
 vanished task branch is reported as `skipped` with a reason, never an error,
 and no hooks fire (it's not a lifecycle op). A `dirty` flag marks a worktree
 with uncommitted changes — **those changes are NOT in the numbers**; commit
-them to see them counted.
+them to see them counted. A **stacked** participant ([`--stack`](#uberepo-open-task--start-a-task))
+is compared against its **parent's branch**, not the repo default, so its
+ahead-count/diffstat are its own commits beyond the sibling it sits on; the
+human output nests it under its parent in a `└─` tree, and `--json` carries the
+edge as `parent`/`base` per entry.
 
 ### `uberepo context <task>` — the resume-a-task handoff
 
@@ -66,7 +70,9 @@ worktree: no `gh` on PATH → every PR field is silently omitted (no flag — th
 degradation is automatic); a branch without a PR shows `no PR` (JSON: `pr`
 absent); any `gh` error reads as no-PR, never an abort. Like `diff`: nothing
 is fetched, no hooks fire, and a repo that can't be read is `skipped` with a
-reason.
+reason — and a **stacked** child is measured against its parent's branch, nested
+under it in the markdown (and carrying `parent`/`base` in `--json`), exactly as
+`diff` does.
 
 ## Task lifecycle
 
@@ -104,6 +110,18 @@ cloned repo, off each clone's current HEAD.
   repo or alias name may not contain `@`, `:`, or glob chars (`[ ] * ?`), be a Windows
   reserved name (`con`/`prn`/`aux`/`nul`/`com1`–`9`/`lpt1`–`9`), or end in a dot or
   space; participants must be unique case-insensitively.
+- **`--stack <child>=<parent>` — stack one branch on a sibling.** Repeatable. Records
+  the **child** participant's [`branches:`](#schema) `base` as the **parent**
+  participant token (`--stack web@logos=web@strings` → `web@logos`'s base is
+  `web@strings`) — a *stack edge*, a sibling reference rather than a remote ref. From
+  then on `ship` opens the child's PR against the parent's branch and `sync` rebases
+  the child onto the freshly-moved parent (see those commands). An explicit `--stack`
+  **overrides** a PR-discovered base for that participant. Both ends must be in the
+  task's scope and the **same repo** (a branch can only stack on a sibling of its own
+  repo), and the edges must stay **acyclic** — a parent outside scope, a cross-repo
+  pairing, or a cycle is rejected up front with the offending edge named (fix it with
+  `--repos`/the right token, or drop the `--stack`). A participant with no `--stack`
+  is an ordinary root.
 - **Named repos clone on demand.** A repo explicitly asked for (named by
   `--repos` now, or stored in the note's `repos:` on a re-open) that is
   registered but not yet cloned is cloned into `source/<repo>` first — its
@@ -157,9 +175,20 @@ Fetches and rebases each worktree onto its repo's fresh default branch.
 
 - `--from <ref>` — rebase onto `<ref>` instead of the default branch.
 - **Refuses to start if any worktree is dirty** — commit or stash first.
+- **Stacks rebase bottom-up.** A [stacked](#uberepo-open-task--start-a-task)
+  participant doesn't rebase onto the repo default — it rebases onto its
+  **parent's** freshly-moved branch, and sync walks the per-repo stack forest
+  **topologically** (every parent before its children) so a rebase ripples up
+  the stack without flattening it. A repo with no commits ahead (already
+  restacked / up-to-date) is reported `current`. If an ancestor's rebase
+  conflicts (or is otherwise not reached), its descendants are pruned with
+  `"parent not synced"` — fix the parent, then re-run to carry the stack the
+  rest of the way.
 - **Stops on conflict**: leaves that repo mid-rebase. Resolve it in that
-  worktree (`git add` the resolved files, `git rebase --continue`), then re-run
-  `uberepo sync <task>` to carry on with the remaining repos.
+  worktree (`git add` the resolved files, `git rebase --continue`, or
+  `git rebase --abort` to back out), then re-run `uberepo sync <task>` to carry
+  on with the remaining repos — including any stacked descendants that were
+  pruned as `"parent not synced"` while the conflict stood.
 - `--check` — a conflict **forecast**: fetch (the one ref update), then predict
   each repo's rebase with `git merge-tree` — no rebase, no hooks, no carry, no
   worktree mutation. Per repo: `current` (the target is already contained —
@@ -194,7 +223,11 @@ sharing its base discovery and PR-template lookup; nothing is merged.
   directory is ignored). `gh` does NOT auto-apply templates, so ship reads the file
   and passes it as the body. **Nothing else is appended to the body.**
 - `--base <ref>` — base branch for the PRs (default: each repo's remote default,
-  e.g. `main`).
+  e.g. `main`). A [stacked](#uberepo-open-task--start-a-task) child ignores this:
+  its PR always targets its **parent's branch** (e.g. `task/<task>@strings`), and
+  ship pushes the **parents first** so the base exists. A child whose parent isn't
+  on the remote yet is **skipped** with `parent <token> not on remote — ship it
+  first` — ship the parent, then re-run.
 - `--no-pr` — push only; skip every `gh` call. The one mode that needs no `gh`.
 - `--force` — push with `--force-with-lease` (needed after a `sync`/rebase diverges
   the already-pushed branch). The default push is plain and refuses a diverged push
@@ -265,7 +298,11 @@ task on `close`.
   and resolves by default; an entry appears only when adoption or `--branch` deviates
   from it. `adopted: true` marks a pre-existing branch uberepo attached to rather
   than created — `close`/`prune` keep it; `base` is its rebase/PR target, auto-filled
-  from the branch's PR for adopted branches, else the repo default.
+  from the branch's PR for adopted branches, else the repo default. `base` may also
+  name **another participant token** in the task (`web@logos`'s `base: web@strings`) —
+  a **stack edge** written by [`open --stack`](#uberepo-open-task--start-a-task), not a
+  remote ref: `ship`/`sync`/`diff`/`context` then target/rebase/compare the participant
+  against that sibling's branch instead of a remote default.
 - `tickets` — list of URLs (issue, PR, doc, thread).
 - `decisions` / `blockers` — lists of `{ note: |, repo? }`. `note` is a `|` literal
   block (free text — colons, `#`, slashes need no quoting). `repo:` is optional —
@@ -409,7 +446,8 @@ URL strings.
 | Refusal | Cause | Fix |
 | --- | --- | --- |
 | `sync` won't start | a worktree is dirty | commit or stash in that worktree, re-run |
-| `sync` stopped mid-run | rebase conflict | resolve in the worktree, `git rebase --continue`, re-run `sync` |
+| `sync` stopped mid-run | rebase conflict | resolve in the worktree, `git rebase --continue` (or `--abort`), re-run `sync` |
+| `sync` pruned a stacked child | its parent's restack conflicted (`"parent not synced"`) | resolve the parent's conflict, `git rebase --continue`, then re-run `sync` — the child restacks once the parent lands |
 | `close` refused | uncommitted/unmerged work | commit + push, then re-run; `--force` only if the work is truly saved |
 | `prune` skipped a task | branch not fully merged | merge/push first, or leave it; `--force` removes regardless |
 
@@ -431,14 +469,14 @@ distinct in the output.
 | `sources` | `[{ name, url, cloned }]` |
 | `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `reason` (skip): `"pre-clone hook failed"`; `hooks` lists every hook that ran (pre and post); with `--repos <name>...` the same shape, just only the named repos |
 | `pull` | `{ repos: [{ name, status: "updated" \| "current" \| "skipped", reason? }] }` — `reason`: `"not cloned"`, `"uncommitted changes"`, `"can't fast-forward"` |
-| `status` | `[{ name, repos: [{ name, branch?, dirty }], note? }]` |
-| `diff` | `{ task, base, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
-| `context` | `{ task, base, note?, repos: [{ name, branch, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], pr?: { number, url, draft, state }, status: "ok" \| "skipped", reason? }] }` — `diff`'s footprint per repo (same fields, same skip reasons) plus `pr` when `gh` knows a PR for the branch (`draft` bool; `state`: gh's `OPEN`/`CLOSED`/`MERGED`); `pr` absent when the branch has no PR or `gh` is missing/failed (automatic degradation, never an error); `note` is the full task note (see below), omitted when the task has none |
+| `status` | `[{ name, repos: [{ name, branch?, dirty, parent?, base? }], note? }]` — a repo entry gains `parent` (the sibling token its branch stacks on) and `base` (that sibling's branch) only when it's a stacked child; a repo's entries come parent-before-child |
+| `diff` | `{ task, base, repos: [{ name, branch, parent?, base, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — top-level `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); each entry's per-row `base` is the ref IT was compared against (a stacked child's parent branch, else the run base), and `parent` (present only on a stacked child) is the sibling token it sits on (entries are ordered parent-before-child); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, the per-row `base`/`parent`, and `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
+| `context` | `{ task, base, note?, repos: [{ name, branch, parent?, base, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], pr?: { number, url, draft, state }, status: "ok" \| "skipped", reason? }] }` — `diff`'s footprint per repo (same fields, same per-row `base`/`parent` stack edge, same skip reasons, same parent-before-child order) plus `pr` when `gh` knows a PR for the branch (`draft` bool; `state`: gh's `OPEN`/`CLOSED`/`MERGED`); `pr` absent when the branch has no PR or `gh` is missing/failed (automatic degradation, never an error); `note` is the full task note (see below), omitted when the task has none |
 | `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], clone: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`, `"pre-clone hook failed"`, `"clone failed"`, `"not registered"`; `clone` has one entry per scoped repo cloned on demand this run (same entry shape as `clone`'s repos; a `failed` entry means that repo got no worktree, the run continued, and the exit code is non-zero); `hooks` lists every hook that ran (pre and post, the clone events included); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
 | `exec` | `{ task, command: string[], repos: [{ name, branch, exitCode?, status: "ok" \| "failed" \| "skipped", stdout?, stderr? }] }` — `command` is the argv after `--`; one entry per worktree it ran in, in sequence: `status` is `"ok"` (exit 0) or `"failed"` (non-zero), each carrying the child's `exitCode` and captured `stdout`/`stderr`. Exits non-zero if any repo failed; `--bail` stops after the first. A `skipped` entry (no `exitCode`) is an in-scope repo with no worktree — like `ship`, those normally don't appear at all |
-| `sync` | `{ task, onto, repos: [{ name, status: "rebased" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `reason`: `"uncommitted changes"`, `"not reached"`, `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
+| `sync` | `{ task, onto, repos: [{ name, base?, status: "rebased" \| "current" \| "conflict" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }] }` — `status` adds `current` (already restacked / up-to-date — nothing to rebase); a stacked child carries the per-entry `base` it was rebased onto (its parent's branch); `reason`: `"uncommitted changes"`, `"not reached"`, `"parent not synced"` (a stacked descendant pruned because an ancestor wasn't reached), `"cannot resolve origin's default branch"`, `"pre-sync hook failed"`; entries come parent-before-child; `onto` is `""` if it bailed before resolving; `hooks` lists every hook that ran (pre and post); `carry` has one entry per cleanly-rebased repo with carry patterns |
 | `sync --check` | `{ task, onto, check: true, repos: [{ name, status: "clean" \| "conflicts" \| "current" \| "dirty" \| "skipped", files?, reason? }] }` — a forecast: nothing was rebased, no hooks/carry keys; `files` (string[]) lists the likely-conflicted paths when merge-tree hit conflicts (also present on a `dirty` repo whose committed tips would conflict); `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"`, or the per-repo error; exits 0 even when conflicts are forecast |
-| `ship` | `{ task, base, repos: [{ name, branch, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |
+| `ship` | `{ task, base, repos: [{ name, branch, base?, pushed: bool, pr?: { number, url, action: "created" \| "updated" }, status: "shipped" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — top-level `base` is the run default; a stacked child carries the per-entry `base` its PR targets (its parent's branch); `reason` (skip): `"nothing to ship"`, `"uncommitted changes"`, `"parent <token> not on remote — ship it first"` (a stacked child whose parent isn't pushed yet), `"cannot resolve base — pass --base <ref>"`, `"pre-ship hook failed"`; `error` set when `status` is `"failed"` (push/`gh` failure); parents are shipped before children; `pr` present unless `--no-pr`; `action` is `"updated"` when the PR already existed (push-only, not edited); exits non-zero if any repo `failed` |
 | `close` | `{ task, forced: bool, repos: [{ name, status: "closed" \| "skipped", reason? }], hooks: [{ event, repo, exit }], carry: [{ repo, modified }] }` — `reason`: `"uncommitted changes"`, `"unmerged commits"`, `"pre-close hook failed"`; `carry` lists carried files modified inside the task (warn-only — their edits are lost with the worktree) |
 | `prune` | `{ forced: bool, tasks: [{ task, status: "pruned" \| "kept", reason? }] }` — `reason`: `"dirty"`, `"unmerged"`, or the failure message; when `forced` is false a `"pruned"` status means a preview candidate (nothing removed yet) |
 
