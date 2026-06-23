@@ -205,7 +205,7 @@ describe("exec command", () => {
                     command: [
                         "node",
                         "-e",
-                        "process.stdout.write(process.cwd())"
+                        "require('node:fs').writeSync(1, process.cwd())"
                     ]
                 })
             )
@@ -215,7 +215,7 @@ describe("exec command", () => {
         expect(json.command).toEqual([
             "node",
             "-e",
-            "process.stdout.write(process.cwd())"
+            "require('node:fs').writeSync(1, process.cwd())"
         ])
         const api = json.repos.find((r) => r.name === "api")
         const web = json.repos.find((r) => r.name === "web")
@@ -249,7 +249,7 @@ describe("exec command", () => {
                     command: [
                         "node",
                         "-e",
-                        "const e = process.env; process.stdout.write([e.UBEREPO_TASK, e.UBEREPO_REPO, e.UBEREPO_BRANCH].join('|'))"
+                        "const e = process.env; require('node:fs').writeSync(1, [e.UBEREPO_TASK, e.UBEREPO_REPO, e.UBEREPO_BRANCH].join('|'))"
                     ]
                 })
             )

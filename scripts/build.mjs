@@ -1,10 +1,9 @@
 #!/usr/bin/env node
 // Production build: bundle the TypeScript CLI into a single plain-JS ESM file.
 //
-// Everything is bundled — cmdore (a `file:lib` dependency that no registry can
-// resolve, so it MUST be inlined for the published package to work) and
-// minimatch alike — leaving node builtins as the only imports. The published
-// package therefore has zero runtime dependencies.
+// Everything is bundled — cmdore and minimatch alike — leaving node builtins
+// as the only imports. The published package therefore has zero runtime
+// dependencies.
 //
 // esbuild reads tsconfig.json for the "@/*" path alias. The output format is
 // ESM, while the sources (and the bundled CJS deps) are CommonJS-flavored:
