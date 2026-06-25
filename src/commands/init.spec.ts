@@ -66,6 +66,20 @@ const AGENT_SKILL_REF_REL = path.join(
     "using-uberepo",
     "reference.md"
 )
+// The second bundled skill, boot-uberepo, stamps the same recursive way under
+// both .claude/ (Claude Code) and .agents/ (Codex & Gemini).
+const BOOT_SKILL_REL = path.join(
+    ".claude",
+    "skills",
+    "boot-uberepo",
+    "SKILL.md"
+)
+const BOOT_AGENT_SKILL_REL = path.join(
+    ".agents",
+    "skills",
+    "boot-uberepo",
+    "SKILL.md"
+)
 
 // The on-disk template/ files are the single source of truth for what init
 // stamps — read them straight off disk (resolved relative to this spec, the
@@ -186,6 +200,24 @@ describe("init command", () => {
         expect(
             await fsp.readFile(path.join(tmp, AGENT_SKILL_REF_REL), "utf8")
         ).toBe(agentSkillRefTemplate)
+    })
+
+    it("stamps the boot-uberepo skill under .claude/ and .agents/", async () => {
+        await init.run({ name: undefined, "no-agents": false })
+
+        // boot-uberepo is the second bundled skill; the recursive stamp lands it
+        // byte-for-byte in both trees, exactly like using-uberepo.
+        expect(await fsp.readFile(path.join(tmp, BOOT_SKILL_REL), "utf8")).toBe(
+            await fsp.readFile(path.join(TEMPLATE_DIR, BOOT_SKILL_REL), "utf8")
+        )
+        expect(
+            await fsp.readFile(path.join(tmp, BOOT_AGENT_SKILL_REL), "utf8")
+        ).toBe(
+            await fsp.readFile(
+                path.join(TEMPLATE_DIR, BOOT_AGENT_SKILL_REL),
+                "utf8"
+            )
+        )
     })
 
     it("does NOT stamp ubertask.yml — it's a per-task seed open copies, not a workspace file", async () => {

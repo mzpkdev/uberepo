@@ -1,13 +1,17 @@
 ---
 name: using-uberepo
 description: |
-  Drive a multi-repo uberepo workspace through the `uberepo` CLI — open/sync/close
-  per-task git worktrees across every repo, clone a workspace's repos, and share a
-  workspace. Trigger when `uberepo.json` is present, the CWD is under `source/` or
-  `tasks/<task>/`, or a task spans several repos managed by uberepo: 'open a task',
-  'sync my task', 'close this task', 'set up the workspace', 'work across these
-  repos'. Do NOT trigger for single-repo git work, or for the conventions of an
-  individual repo inside a worktree — defer to that repo's own AGENTS.md/README.
+  Drive a multi-repo uberepo workspace through the `uberepo` CLI — the workspace where
+  one task owns a git worktree + branch in every repo, so you switch tasks by switching
+  directories, not `git checkout`. Covers the whole lifecycle and every command: open,
+  status, diff, context, exec, sync, ship, close a task; add / clone / pull / sources /
+  remove / prune; sharing a workspace; and stacked PRs (`repo@alias`, `--stack`). Trigger
+  whenever `uberepo.json` is present, the CWD is under `source/` or `tasks/<task>/`, or
+  work spans several repos managed by uberepo — e.g. 'open a task', 'sync my task', 'ship
+  this task', 'close this task', 'what's the status of my task', 'resume / hand off this
+  task', 'rebase the worktrees', 'work across these repos'. Do NOT trigger for plain
+  single-repo git work with no `uberepo.json`, or for the build/test/commit conventions
+  inside one repo's worktree — defer to that repo's own AGENTS.md/README.
 ---
 
 # Using uberepo
