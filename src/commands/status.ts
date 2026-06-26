@@ -21,7 +21,11 @@ export default defineCommand({
     description: "Show open tasks and the state of their worktrees",
     arguments: [task],
     async run(argv) {
-        const tasks = await openTasks()
+        // Enriched: status is the cheap offline glance, so it opts into the
+        // extra deterministic local-git fields (head/committedAt/pushed/
+        // ahead/behind per repo, dirty/lastActive per task). They ride the
+        // --json payload via withStack's spread; the human view ignores them.
+        const tasks = await openTasks({ enrich: true })
 
         // The exact set the human view renders: every task, or just the named
         // one when filtered. JSON emits this same list so both views agree
@@ -98,15 +102,28 @@ const orderedRepos = (task: Task): TaskRepo[] => {
     return order.map((name) => byName.get(name) as TaskRepo)
 }
 
-// Enrich a task's repo entries with their stack edge for the JSON payload, in
-// topological order. Additive: the `{ name, branch?, dirty }` shape is
-// untouched; a stacked child simply gains `parent`/`base`. A root / unstacked
-// task is byte-identical to before (same order, no extra keys).
+// The PR link for one repo of a task, surfaced from the note: `pr` is the url
+// `ship` persisted (or `open` discovered on adopt) for the participant's
+// branch, so the JSON carries it offline (no gh call). Note-derived, NOT
+// git-derived, and independent of stacking — any participant may have one.
+// Absent → {}, so the spread adds nothing and an un-shipped task's payload is
+// byte-identical.
+const prEdge = (task: Task, repo: TaskRepo): { pr?: string } => {
+    const pr = task.note?.branches?.[repo.name]?.pr
+    return pr !== undefined ? { pr } : {}
+}
+
+// Enrich a task's repo entries with their stack edge and PR link for the JSON
+// payload, in topological order. Additive: the `{ name, branch?, dirty }`
+// shape is untouched; a stacked child gains `parent`/`base`, a shipped one
+// gains `pr`. A root / unstacked / un-shipped task is byte-identical to before
+// (same order, no extra keys).
 const withStack = (task: Task): Task => ({
     ...task,
     repos: orderedRepos(task).map((repo) => ({
         ...repo,
-        ...stackEdge(task, repo)
+        ...stackEdge(task, repo),
+        ...prEdge(task, repo)
     }))
 })
 
@@ -142,7 +159,13 @@ const print = (task: Task) => {
             stackEdge(task, repo).parent !== undefined
                 ? STACK_CHILD
                 : STACK_INDENT
-        terminal.log(`${lead}${repo.name.padEnd(width)}  ${branch}  ${state}`)
+        // The PR link, when one is persisted, trails the state — note-derived
+        // so it shows offline. No pr → the line is byte-identical to before.
+        const pr = prEdge(task, repo).pr
+        const link = pr !== undefined ? `  ${pr}` : ""
+        terminal.log(
+            `${lead}${repo.name.padEnd(width)}  ${branch}  ${state}${link}`
+        )
     }
 }
 

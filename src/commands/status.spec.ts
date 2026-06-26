@@ -338,6 +338,17 @@ describe("status command", () => {
         return written
     }
 
+    // The enriched per-repo fields status --json adds. Deterministic in these
+    // fixtures — sources have no remote (never pushed → no ahead/behind), and
+    // every worktree is on a branch (not detached). The sha and commit date are
+    // real but commit/time-dependent, so they ride asymmetric matchers.
+    const enriched = {
+        head: expect.any(String),
+        detached: false,
+        committedAt: expect.any(String),
+        pushed: false
+    }
+
     it("emits the full Task[] under --json and leaks no human lines", async () => {
         await makeSource("api")
         await makeSource("web")
@@ -364,14 +375,35 @@ describe("status command", () => {
         expect(parsed).toEqual([
             {
                 name: "alpha",
+                dirty: false,
+                lastActive: expect.any(String),
                 repos: [
-                    { name: "api", branch: "task/alpha", dirty: false },
-                    { name: "web", branch: "task/alpha", dirty: false }
+                    {
+                        name: "api",
+                        branch: "task/alpha",
+                        dirty: false,
+                        ...enriched
+                    },
+                    {
+                        name: "web",
+                        branch: "task/alpha",
+                        dirty: false,
+                        ...enriched
+                    }
                 ]
             },
             {
                 name: "beta",
-                repos: [{ name: "api", branch: "task/beta", dirty: false }]
+                dirty: false,
+                lastActive: expect.any(String),
+                repos: [
+                    {
+                        name: "api",
+                        branch: "task/beta",
+                        dirty: false,
+                        ...enriched
+                    }
+                ]
             }
         ])
     })
@@ -390,9 +422,45 @@ describe("status command", () => {
         expect(parsed).toEqual([
             {
                 name: "beta",
-                repos: [{ name: "api", branch: "task/beta", dirty: false }]
+                dirty: false,
+                lastActive: expect.any(String),
+                repos: [
+                    {
+                        name: "api",
+                        branch: "task/beta",
+                        dirty: false,
+                        ...enriched
+                    }
+                ]
             }
         ])
+    })
+
+    it("enriches each repo with head/detached/committedAt/pushed and the task with dirty/lastActive", async () => {
+        await makeSource("api")
+        await register(["api"])
+        await openWorktree("api", "alpha")
+
+        const written = await captureJson(async () => {
+            await status.run({ task: undefined })
+        })
+        const [task] = JSON.parse(written.join("")) as Task[]
+        const [repo] = task.repos
+
+        // Per-repo: abbreviated HEAD sha, on a branch (not detached), a strict
+        // ISO 8601 commit date, and — no remote in the fixture — pushed:false
+        // with NO ahead/behind keys (those appear only once pushed).
+        expect(repo.head).toMatch(/^[0-9a-f]{7}$/)
+        expect(repo.detached).toBe(false)
+        expect(repo.committedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+        expect(repo.pushed).toBe(false)
+        expect(repo).not.toHaveProperty("ahead")
+        expect(repo).not.toHaveProperty("behind")
+
+        // Per-task rollups: a clean worktree → dirty:false, and lastActive is a
+        // valid ISO 8601 timestamp (here the lone commit's date).
+        expect(task.dirty).toBe(false)
+        expect(task.lastActive).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
     })
 
     it("reflects a dirty worktree in the JSON payload", async () => {
@@ -409,7 +477,16 @@ describe("status command", () => {
         expect(parsed).toEqual([
             {
                 name: "alpha",
-                repos: [{ name: "api", branch: "task/alpha", dirty: true }]
+                dirty: true,
+                lastActive: expect.any(String),
+                repos: [
+                    {
+                        name: "api",
+                        branch: "task/alpha",
+                        dirty: true,
+                        ...enriched
+                    }
+                ]
             }
         ])
     })
@@ -437,7 +514,16 @@ describe("status command", () => {
         expect(parsed).toEqual([
             {
                 name: "alpha",
-                repos: [{ name: "api", branch: "task/alpha", dirty: false }],
+                dirty: false,
+                lastActive: expect.any(String),
+                repos: [
+                    {
+                        name: "api",
+                        branch: "task/alpha",
+                        dirty: false,
+                        ...enriched
+                    }
+                ],
                 note: {
                     goal: "do the thing",
                     repos: [],
@@ -504,7 +590,16 @@ describe("status command", () => {
         expect(parsed).toEqual([
             {
                 name: "alpha",
-                repos: [{ name: "api", branch: "task/alpha", dirty: false }]
+                dirty: false,
+                lastActive: expect.any(String),
+                repos: [
+                    {
+                        name: "api",
+                        branch: "task/alpha",
+                        dirty: false,
+                        ...enriched
+                    }
+                ]
             }
         ])
         expect(parsed[0]).not.toHaveProperty("note")
@@ -576,14 +671,21 @@ describe("status command", () => {
                 {
                     name: "autopilot@add-feature",
                     branch: "task/alpha@add-feature",
-                    dirty: false
+                    dirty: false,
+                    ...enriched
                 },
                 {
                     name: "autopilot@bug-fix",
                     branch: "task/alpha@bug-fix",
-                    dirty: false
+                    dirty: false,
+                    ...enriched
                 },
-                { name: "web", branch: "task/alpha", dirty: false }
+                {
+                    name: "web",
+                    branch: "task/alpha",
+                    dirty: false,
+                    ...enriched
+                }
             ])
         })
     })
@@ -667,12 +769,13 @@ describe("status command", () => {
                 "web@strings",
                 "web@logos"
             ])
-            // The root carries no parent/base — just the base `{ name, branch,
-            // dirty }` shape.
+            // The root carries no parent/base — just the standard enriched
+            // entry, no stack keys.
             expect(parsed[0].repos[0]).toEqual({
                 name: "web@strings",
                 branch: "task/alpha@strings",
-                dirty: false
+                dirty: false,
+                ...enriched
             })
             // The child gains `parent` (the sibling token) and `base` (that
             // sibling's branch — the ref it's stacked on).
@@ -680,6 +783,7 @@ describe("status command", () => {
                 name: "web@logos",
                 branch: "task/alpha@logos",
                 dirty: false,
+                ...enriched,
                 parent: "web@strings",
                 base: "task/alpha@strings"
             })
@@ -718,12 +822,72 @@ describe("status command", () => {
                     })
                 ).join("")
             ) as Task[]
-            // Every entry keeps the exact `{ name, branch, dirty }` shape — no
-            // parent/base key crept in.
+            // Every entry keeps the standard enriched shape — no stack
+            // parent/base key crept onto an unstacked task.
             expect(parsed[0].repos).toEqual([
-                { name: "api", branch: "task/alpha", dirty: false },
-                { name: "web", branch: "task/alpha", dirty: false }
+                {
+                    name: "api",
+                    branch: "task/alpha",
+                    dirty: false,
+                    ...enriched
+                },
+                {
+                    name: "web",
+                    branch: "task/alpha",
+                    dirty: false,
+                    ...enriched
+                }
             ])
+        })
+    })
+
+    describe("PR link (note-derived, offline)", () => {
+        // A note whose api entry carries a persisted PR url (the link ship
+        // writes / open discovers on adopt), for an open task `alpha`.
+        const prNote = (task: string): Promise<string> =>
+            writeNote(
+                task,
+                "goal: |\n  g\n\nrepos:\n  - api\n\nbranches:\n  api:\n    name: task/alpha\n    adopted: false\n    pr: https://github.com/acme/api/pull/9\n"
+            )
+
+        it("carries the participant's pr in the --json repo entry", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await openWorktree("api", "alpha")
+            await prNote("alpha")
+
+            const parsed = JSON.parse(
+                (
+                    await captureJson(async () => {
+                        await status.run({ task: "alpha" })
+                    })
+                ).join("")
+            ) as Task[]
+
+            expect(parsed[0].repos).toEqual([
+                {
+                    name: "api",
+                    branch: "task/alpha",
+                    dirty: false,
+                    ...enriched,
+                    pr: "https://github.com/acme/api/pull/9"
+                }
+            ])
+        })
+
+        it("appends the pr url to the human repo line", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await openWorktree("api", "alpha")
+            await prNote("alpha")
+
+            const logs = await captureLogs(async () => {
+                await status.run({ task: "alpha" })
+            })
+
+            // The repo row (the one carrying the branch) carries the pr url too.
+            const line = logs.find((l) => l.includes("task/alpha"))
+            expect(line).toContain("https://github.com/acme/api/pull/9")
         })
     })
 })

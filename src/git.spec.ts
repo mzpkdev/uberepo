@@ -376,6 +376,64 @@ describe("git integration", () => {
         })
     })
 
+    describe("committedAt", () => {
+        it("returns HEAD's strict ISO 8601 committer date, agreeing with git", async () => {
+            const repo = await cloneOrigin()
+            const wtPath = path.join(tmp, "wt-date")
+            const wt = await repo
+                .worktree(wtPath)
+                .create({ branch: "task/d", from: "HEAD" })
+
+            const at = await wt.committedAt()
+            expect(at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/)
+            // The wrapper agrees with git's own %cI for the worktree's HEAD.
+            expect(at).toBe(
+                await sh(wtPath, "log", "-1", "--format=%cI", "HEAD")
+            )
+        })
+    })
+
+    describe("aheadBehind", () => {
+        it("counts commits ahead of and behind origin/<branch>", async () => {
+            const repo = await cloneOrigin()
+            // A branch pushed to origin, then attached in a worktree.
+            await sh(repo.path, "switch", "-c", "feature", "main")
+            await sh(repo.path, "push", "-u", "origin", "feature")
+            await sh(repo.path, "switch", "main")
+            const wtPath = path.join(tmp, "wt-ab")
+            const wt = await repo
+                .worktree(wtPath)
+                .create({ branch: "feature", attach: true })
+
+            // In sync with origin right after the push.
+            expect(await wt.aheadBehind("feature")).toEqual({
+                ahead: 0,
+                behind: 0
+            })
+
+            // One local commit → ahead by one, behind none.
+            await fsp.writeFile(path.join(wtPath, "a.txt"), "a\n")
+            await sh(wtPath, "add", "a.txt")
+            await sh(wtPath, "commit", "-m", "local ahead")
+            expect(await wt.aheadBehind("feature")).toEqual({
+                ahead: 1,
+                behind: 0
+            })
+
+            // Advance origin/feature and fetch → now also behind by one.
+            await sh(originPath, "switch", "feature")
+            await fsp.writeFile(path.join(originPath, "b.txt"), "b\n")
+            await sh(originPath, "add", "b.txt")
+            await sh(originPath, "commit", "-m", "remote ahead")
+            await sh(originPath, "switch", "main")
+            await repo.fetch()
+            expect(await wt.aheadBehind("feature")).toEqual({
+                ahead: 1,
+                behind: 1
+            })
+        })
+    })
+
     describe("worktrees()", () => {
         it("lists every worktree, including the freshly created one", async () => {
             const repo = await cloneOrigin()

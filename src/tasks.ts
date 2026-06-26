@@ -205,10 +205,25 @@ export const UBERTASK_FILENAME = "ubertask.yml"
 // (if any), and whether that worktree has uncommitted changes. Derived from
 // `git worktree list`, so `name` is the on-disk folder, the participant identity
 // every per-task command keys on.
+//
+// The trailing fields are the ENRICHED view openTasks({ enrich: true }) adds
+// for `status --json` — all deterministic local-git, no network. They are
+// ABSENT on an unenriched read (prune), so its payload stays byte-identical:
+// `head` (abbreviated HEAD sha) and `detached` ride the worktree listing for
+// free; `committedAt` (HEAD's ISO 8601 committer date) is the freshness signal;
+// `pushed` says whether origin/<branch> exists, and `ahead`/`behind` (present
+// only when pushed) count the branch's drift from it. A detached participant
+// (no branch) carries none of pushed/ahead/behind.
 export type TaskRepo = {
     name: string
     branch?: string
     dirty: boolean
+    head?: string
+    detached?: boolean
+    committedAt?: string
+    pushed?: boolean
+    ahead?: number
+    behind?: number
 }
 
 // The per-task durable note (ubertask.yml) when present: its parsed contents
@@ -223,10 +238,18 @@ export type TaskNote = Ubertask & {
 // A task and the per-repo worktrees that make it up. `repos` is ordered by
 // flat name for stable output. `note` carries the durable note's freshness when
 // the task has a ubertask.yml; it is omitted entirely when there is none.
+//
+// `dirty` and `lastActive` are the ENRICHED task-level rollups openTasks({
+// enrich: true }) adds for `status --json` — `dirty` is true when ANY repo is
+// dirty (the one badge a dashboard wants per task), and `lastActive` is the
+// most recent of every repo's `committedAt` and the note's mtime, as ISO 8601
+// (the timestamp a dashboard sorts on). Both ABSENT on an unenriched read.
 export type Task = {
     name: string
     repos: TaskRepo[]
     note?: TaskNote
+    dirty?: boolean
+    lastActive?: string
 }
 
 // A coarse, human relative age for an epoch-ms timestamp: "just now", "5m ago",
@@ -367,11 +390,19 @@ const parseTaskPath = (
 // (source/<name> exists), read its real worktree registry and keep the
 // worktrees living under <root>/tasks/. Worktrees are grouped by task, and
 // both tasks and their repos come back in stable (sorted) order.
+//
+// `enrich` opts into the `status --json` view: extra deterministic local-git
+// fields per repo (head/detached/committedAt/pushed/ahead/behind) and the
+// task-level dirty/lastActive rollups. It costs a few more git calls per
+// worktree, so the cheaper callers (prune) leave it off and get the exact
+// shape they always did.
 export const openTasks = async (options?: {
     cwd?: string
+    enrich?: boolean
 }): Promise<Task[]> => {
-    const config = await Config.read(options)
-    const root = await Config.root(options)
+    const { cwd, enrich = false } = options ?? {}
+    const config = await Config.read({ cwd })
+    const root = await Config.root({ cwd })
 
     const byTask = new Map<string, Map<string, TaskRepo>>()
     for (const entry of config.repositories) {
@@ -387,11 +418,35 @@ export const openTasks = async (options?: {
                 continue
             }
             const repos = byTask.get(parsed.task) ?? new Map<string, TaskRepo>()
-            repos.set(parsed.name, {
+            const entry: TaskRepo = {
                 name: parsed.name,
                 branch: worktree.branch,
                 dirty: await worktree.dirty()
-            })
+            }
+            // Enriched (status --json): deterministic local-git fields, no
+            // network. head/detached ride the listing for free; committedAt is
+            // one `git log -1`; pushed + ahead/behind interrogate the
+            // remote-tracking ref (origin/<branch>) — skipped wholesale for a
+            // detached worktree (no branch to track), and ahead/behind only
+            // once the branch is actually pushed.
+            if (enrich) {
+                entry.head = worktree.head.slice(0, 7)
+                entry.detached = worktree.detached
+                entry.committedAt = await worktree.committedAt()
+                if (worktree.branch !== undefined) {
+                    entry.pushed = await repo.remoteBranchExists(
+                        worktree.branch
+                    )
+                    if (entry.pushed) {
+                        const { ahead, behind } = await worktree.aheadBehind(
+                            worktree.branch
+                        )
+                        entry.ahead = ahead
+                        entry.behind = behind
+                    }
+                }
+            }
+            repos.set(parsed.name, entry)
             byTask.set(parsed.task, repos)
         }
     }
@@ -404,7 +459,24 @@ export const openTasks = async (options?: {
             const note = await readNote(root, name)
             // Spread keeps `note` off the object entirely when absent, so the
             // JSON shape gains the key only for tasks that actually have one.
-            return { name, repos, ...(note ? { note } : {}) }
+            const task: Task = { name, repos, ...(note ? { note } : {}) }
+            // Enriched task-level rollups (status --json): the dirty badge (any
+            // repo dirty) and lastActive — the most recent of every repo's
+            // committedAt and the note's mtime, as ISO 8601. Both stay absent
+            // on an unenriched read, so prune's payload is byte-identical.
+            if (enrich) {
+                task.dirty = repos.some((repo) => repo.dirty)
+                const times = repos
+                    .map((repo) =>
+                        repo.committedAt ? Date.parse(repo.committedAt) : 0
+                    )
+                    .concat(note ? [note.mtime] : [])
+                const latest = Math.max(0, ...times)
+                if (latest > 0) {
+                    task.lastActive = new Date(latest).toISOString()
+                }
+            }
+            return task
         })
     )
 }

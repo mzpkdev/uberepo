@@ -585,6 +585,40 @@ export default defineCommand({
             }
         }
 
+        // Persist each shipped participant's PR url into the durable note, so
+        // status can surface the link offline (no gh call). Read-modify-write
+        // ONCE after the loop: only participants that got a PR this run
+        // (item.out.pr is the same url the JSON reports) touch the note, so a
+        // --repos subset / --no-pr run preserves every other entry. A task with
+        // no note file (rare — open seeds one) skips persistence entirely.
+        const fresh = await ubertask.read(notePath)
+        if (fresh) {
+            let changed = false
+            for (const item of pending) {
+                const url = item.out.pr?.url
+                if (url === undefined) {
+                    continue
+                }
+                const existing = fresh.branches[item.name]
+                if (existing) {
+                    // Preserve name/adopted/base — only stamp the pr on.
+                    existing.pr = url
+                } else {
+                    // Materialize a minimal entry to hold the pr; branchFor
+                    // reconstructs the participant's resolved branch name.
+                    fresh.branches[item.name] = {
+                        name: branchFor(argv.task, item.name, fresh.branches),
+                        adopted: false,
+                        pr: url
+                    }
+                }
+                changed = true
+            }
+            if (changed) {
+                await ubertask.write(notePath, fresh)
+            }
+        }
+
         terminal.json({
             task: argv.task,
             base: baseLabel,

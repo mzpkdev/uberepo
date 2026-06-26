@@ -412,6 +412,44 @@ export class Worktree {
         return out.trim().length > 0
     }
 
+    // The committer date of this worktree's HEAD commit as strict ISO 8601
+    // (`git log -1 --format=%cI`, e.g. "2026-06-26T10:12:04+02:00"). The
+    // freshness signal status surfaces: how recently this participant's branch
+    // last moved, the deterministic git-sourced answer to "is this being worked
+    // or has it gone stale". HEAD always resolves in a real worktree (even a
+    // detached one), so this never fails on an open task.
+    async committedAt(): Promise<string> {
+        const out = await run(["log", "-1", "--format=%cI", "HEAD"], this.path)
+        return out.trim()
+    }
+
+    // Commits this worktree's branch is {ahead, behind} its remote-tracking
+    // counterpart, via `git rev-list --left-right --count <remote>/<branch>...
+    // HEAD` → "<behind>\t<ahead>" (left = on the remote but not local = behind;
+    // right = local but not pushed = ahead). The caller MUST confirm the
+    // upstream exists first (remoteBranchExists) — a missing <remote>/<branch>
+    // makes rev-list throw, which is the "never pushed" case, reported as
+    // `pushed: false` rather than ahead/behind.
+    async aheadBehind(
+        branch: string,
+        remote = "origin"
+    ): Promise<{ ahead: number; behind: number }> {
+        const out = await run(
+            [
+                "rev-list",
+                "--left-right",
+                "--count",
+                `${remote}/${branch}...HEAD`
+            ],
+            this.path
+        )
+        const [behind, ahead] = out
+            .trim()
+            .split(/\s+/)
+            .map((n) => Number(n) || 0)
+        return { ahead: ahead ?? 0, behind: behind ?? 0 }
+    }
+
     static parse(repo: Repository, porcelain: string): Worktree[] {
         const worktrees: Worktree[] = []
         const blocks = porcelain.split(/\n\s*\n/)

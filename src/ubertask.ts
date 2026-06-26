@@ -33,10 +33,20 @@ export type UbertaskItem = {
 // OVERRIDE is stored: a participant on its plain default (task/<task> bare,
 // task/<task>@<alias> aliased) records nothing — branchFor reconstructs the
 // default from the token.
+//
+// `pr` is the URL of the pull request `ship` opened or found for this branch,
+// persisted so `status` can surface the link offline (no `gh` call). It is the
+// one field stored even for an otherwise-default branch — ship materializes a
+// minimal `{ name, adopted: false, pr }` entry to hold it — and `open` also
+// fills it for an adopted branch whose existing PR it discovers. Absent until
+// the branch is shipped (or adopted with a PR). It records WHERE the PR is, not
+// whether it's still open — a merged/closed PR leaves a stale link here; live
+// state comes from `context`'s `gh pr view`.
 export type UbertaskBranch = {
     name: string
     adopted: boolean
     base?: string
+    pr?: string
 }
 
 // The parsed note. Every field is always present so callers never branch on
@@ -222,6 +232,7 @@ const readBranches = (
         let name: string | undefined
         let adopted = false
         let base: string | undefined
+        let pr: string | undefined
         // Consume the field lines indented past the repo header.
         while (i < lines.length) {
             const field = lines[i]
@@ -245,6 +256,8 @@ const readBranches = (
                 adopted = value === "true"
             } else if (kv[1] === "base" && value !== "") {
                 base = value
+            } else if (kv[1] === "pr" && value !== "") {
+                pr = value
             }
             i++
         }
@@ -252,7 +265,8 @@ const readBranches = (
             branches[repo] = {
                 name,
                 adopted,
-                ...(base !== undefined ? { base } : {})
+                ...(base !== undefined ? { base } : {}),
+                ...(pr !== undefined ? { pr } : {})
             }
         }
     }
@@ -366,6 +380,9 @@ const serializeBranches = (
         ]
         if (branch.base !== undefined && branch.base !== "") {
             lines.push(`    base: ${branch.base}`)
+        }
+        if (branch.pr !== undefined && branch.pr !== "") {
+            lines.push(`    pr: ${branch.pr}`)
         }
         return lines.join("\n")
     })

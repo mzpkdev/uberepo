@@ -1,6 +1,6 @@
 {
   "name": "uberepo",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "One workspace for all your repos — a worktree per task across every repo",
   "license": "MIT",
   "bin": {

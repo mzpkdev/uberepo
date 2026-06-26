@@ -274,6 +274,7 @@ task on `close`.
         name: fix/sso-loop
         adopted: true
         base: develop
+        pr: https://github.com/acme/api/pull/42
     tickets:
       - https://acme.atlassian.net/browse/PROJ-1234
     decisions:
@@ -294,16 +295,20 @@ task on `close`.
   and stays empty — an unscoped task can't be narrowed by `--repos`. This is the
   task's scope — distinct from a decision/blocker item's `repo:`.
 - `branches` — branch overrides, keyed by the **participant token** (`web` or
-  `web@auth`): each entry is `{ name, adopted, base? }`. A participant on its default
+  `web@auth`): each entry is `{ name, adopted, base?, pr? }`. A participant on its default
   branch — `task/<task>` (bare) or `task/<task>@<alias>` (aliased) — records nothing
-  and resolves by default; an entry appears only when adoption or `--branch` deviates
-  from it. `adopted: true` marks a pre-existing branch uberepo attached to rather
+  and resolves by default; an entry appears only when adoption, `--branch`, or a shipped
+  PR deviates from it. `adopted: true` marks a pre-existing branch uberepo attached to rather
   than created — `close`/`prune` keep it; `base` is its rebase/PR target, auto-filled
   from the branch's PR for adopted branches, else the repo default. `base` may also
   name **another participant token** in the task (`web@logos`'s `base: web@strings`) —
   a **stack edge** written by [`open --stack`](#uberepo-open-task--start-a-task), not a
   remote ref: `ship`/`sync`/`diff`/`context` then target/rebase/compare the participant
-  against that sibling's branch instead of a remote default.
+  against that sibling's branch instead of a remote default. `pr` is the branch's
+  pull-request URL, written by `ship` when it opens or finds the PR (and by `open` when it
+  adopts a branch that already has one) — persisted so `status` shows the link offline.
+  It records **where** the PR is, not whether it's still open; live state (open/merged/
+  draft) comes from `context`'s `gh pr view`. A merged/closed PR leaves a stale link here.
 - `tickets` — list of URLs (issue, PR, doc, thread).
 - `decisions` / `blockers` — lists of `{ note: |, repo? }`. `note` is a `|` literal
   block (free text — colons, `#`, slashes need no quoting). `repo:` is optional —
@@ -470,7 +475,7 @@ distinct in the output.
 | `sources` | `[{ name, url, cloned }]` |
 | `clone` | `{ repos: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }] }` — fail-fast: at most one `failed` (last entry), then the command exits non-zero; `reason` (skip): `"pre-clone hook failed"`; `hooks` lists every hook that ran (pre and post); with `--repos <name>...` the same shape, just only the named repos |
 | `pull` | `{ repos: [{ name, status: "updated" \| "current" \| "skipped", reason? }] }` — `reason`: `"not cloned"`, `"uncommitted changes"`, `"can't fast-forward"` |
-| `status` | `[{ name, repos: [{ name, branch?, dirty, parent?, base? }], note? }]` — a repo entry gains `parent` (the sibling token its branch stacks on) and `base` (that sibling's branch) only when it's a stacked child; a repo's entries come parent-before-child |
+| `status` | `[{ name, dirty, lastActive, repos: [{ name, branch?, dirty, head, detached, committedAt, pushed?, ahead?, behind?, parent?, base?, pr? }], note? }]` — task-level `dirty` (any repo dirty) and `lastActive` (ISO 8601, newest of the repos' commit dates and the note mtime). Per repo, always: `head` (abbreviated HEAD sha), `detached`, `committedAt` (ISO 8601 committer date). On a branch: `pushed`, plus `ahead`/`behind` (vs `origin/<branch>`) once pushed. Conditional: the stack edge `parent`/`base` on a stacked child (entries come parent-before-child), and `pr` (the branch's PR url, read from the note) once shipped or adopted-with-PR |
 | `diff` | `{ task, base, repos: [{ name, branch, parent?, base, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], status: "ok" \| "skipped", reason? }] }` — top-level `base` is the resolved comparison ref (e.g. `origin/main`; `""` if never resolved); each entry's per-row `base` is the ref IT was compared against (a stacked child's parent branch, else the run base), and `parent` (present only on a stacked child) is the sibling token it sits on (entries are ordered parent-before-child); an `ok` repo carries the numbers (`commits` newest first, full `sha`; `dirty` = uncommitted changes, NOT counted in the numbers); a `skipped` repo carries only `name`, `branch`, the per-row `base`/`parent`, and `reason`: `"no worktree"`, `"branch missing"`, `"cannot resolve origin's default branch"` |
 | `context` | `{ task, base, note?, repos: [{ name, branch, parent?, base, ahead, dirty, files, insertions, deletions, commits: [{ sha, subject }], pr?: { number, url, draft, state }, status: "ok" \| "skipped", reason? }] }` — `diff`'s footprint per repo (same fields, same per-row `base`/`parent` stack edge, same skip reasons, same parent-before-child order) plus `pr` when `gh` knows a PR for the branch (`draft` bool; `state`: gh's `OPEN`/`CLOSED`/`MERGED`); `pr` absent when the branch has no PR or `gh` is missing/failed (automatic degradation, never an error); `note` is the full task note (see below), omitted when the task has none |
 | `open` | `{ task, scope: string[], repos: [{ name, status: "created" \| "skipped", reason? }], clone: [{ name, status: "cloned" \| "skipped" \| "failed", reason?, error? }], hooks: [{ event, repo, exit }], carry: [{ repo, copied, keptExisting, skippedTracked }], note? }` — `reason` (skip): `"pre-open hook failed"`, `"pre-clone hook failed"`, `"clone failed"`, `"not registered"`; `clone` has one entry per scoped repo cloned on demand this run (same entry shape as `clone`'s repos; a `failed` entry means that repo got no worktree, the run continued, and the exit code is non-zero); `hooks` lists every hook that ran (pre and post, the clone events included); `carry` has one entry per fresh worktree in a repo with carry patterns (`copied`/`keptExisting`/`skippedTracked`: string[] of repo-relative paths); `note` is the full task note (see below); absent only when nothing is cloned |
@@ -482,6 +487,7 @@ distinct in the output.
 | `prune` | `{ forced: bool, tasks: [{ task, status: "pruned" \| "kept", reason? }] }` — `reason`: `"dirty"`, `"unmerged"`, or the failure message; when `forced` is false a `"pruned"` status means a preview candidate (nothing removed yet) |
 
 The `note` object (in `status` and `open`) is the parsed `ubertask.yml` plus its
-mtime: `{ goal, repos, tickets, decisions, blockers, mtime }`, where `decisions`
-and `blockers` are `{ note, repo? }[]` and `mtime` is epoch-ms. It is omitted
-when the task has no note file.
+mtime: `{ goal, repos, branches, tickets, decisions, blockers, mtime }`, where
+`branches` maps each participant token to `{ name, adopted, base?, pr? }`,
+`decisions` and `blockers` are `{ note, repo? }[]`, and `mtime` is epoch-ms. It
+is omitted when the task has no note file.

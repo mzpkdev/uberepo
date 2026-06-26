@@ -288,6 +288,63 @@ describe("branches map", () => {
         })
     })
 
+    it("parses and round-trips a `pr` link on a branch entry", () => {
+        const note = parse(
+            "branches:\n" +
+                "  api:\n" +
+                "    name: feat/sso\n" +
+                "    adopted: true\n" +
+                "    base: develop\n" +
+                "    pr: https://github.com/acme/api/pull/42\n"
+        )
+        expect(note.branches).toEqual({
+            api: {
+                name: "feat/sso",
+                adopted: true,
+                base: "develop",
+                pr: "https://github.com/acme/api/pull/42"
+            }
+        })
+        // The URL (colons, slashes) survives serialize→parse unquoted, and the
+        // pr line follows base in the emitted block.
+        expect(parse(serialize(note)).branches).toEqual(note.branches)
+        expect(serialize(note)).toContain(
+            "    base: develop\n    pr: https://github.com/acme/api/pull/42\n"
+        )
+    })
+
+    it("persists a `pr` on an otherwise-default (created) branch — name + adopted:false + pr", () => {
+        // ship materializes a minimal entry to hold the PR link even when the
+        // branch is on its plain default and would otherwise record nothing.
+        const note: Ubertask = {
+            goal: "g",
+            repos: [],
+            branches: {
+                web: {
+                    name: "task/g",
+                    adopted: false,
+                    pr: "https://github.com/acme/web/pull/7"
+                }
+            },
+            tickets: [],
+            decisions: [],
+            blockers: []
+        }
+        expect(parse(serialize(note)).branches).toEqual(note.branches)
+    })
+
+    it("omits the pr line for a branch without one", () => {
+        const note: Ubertask = {
+            goal: "g",
+            repos: [],
+            branches: { web: { name: "task/g", adopted: false } },
+            tickets: [],
+            decisions: [],
+            blockers: []
+        }
+        expect(serialize(note)).not.toContain("pr:")
+    })
+
     it("round-trips created and adopted entries byte-stably", () => {
         const note: Ubertask = {
             goal: "g",

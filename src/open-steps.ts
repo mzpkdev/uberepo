@@ -325,9 +325,12 @@ const openCloned = async (
         adopted: mode.mode === "adopt"
     }
     if (mode.mode === "adopt" && effect.enabled) {
-        const base = await discoverBase(dest, branch)
+        const { base, pr } = await discoverPr(dest, branch)
         if (base !== undefined) {
             recorded.base = base
+        }
+        if (pr !== undefined) {
+            recorded.pr = pr
         }
     }
     let carry: CarryEntry | undefined
@@ -383,25 +386,30 @@ const openCloned = async (
     }
 }
 
-// The base ref for a freshly-adopted branch, discovered from its open PR's
-// target (`baseRefName`), or undefined when there is no PR / no gh. Mirrors
-// context's opportunistic gh use: an up-front availability probe, then prView
-// in the worktree (gh infers the repo from origin), with any gh failure
-// reading as "no PR known" → undefined → the consumers fall back to
-// remoteDefault. PR-only on purpose (the accepted residual): a stacked branch
-// with no PR yet records no base and can flatten on sync — the --branch base
-// override is the escape hatch.
-const discoverBase = async (
+// The base ref AND PR url for a freshly-adopted branch, discovered from its
+// open PR (`baseRefName` / `url`) in ONE prView call — both undefined when
+// there is no PR / no gh. Mirrors context's opportunistic gh use: an up-front
+// availability probe, then prView in the worktree (gh infers the repo from
+// origin), with any gh failure reading as "no PR known" → both undefined → the
+// consumers fall back to remoteDefault (base) and status shows no link (pr).
+// PR-only on purpose (the accepted residual): a stacked branch with no PR yet
+// records no base and can flatten on sync — the --branch base override is the
+// escape hatch. `base` is the branch the PR targets (omitted when gh reports
+// none); `pr` is the PR's url, persisted so status can surface the link offline.
+const discoverPr = async (
     worktree: string,
     branch: string
-): Promise<string | undefined> => {
+): Promise<{ base?: string; pr?: string }> => {
     const run = currentGh()
     if (!(await ghAvailable(run))) {
-        return undefined
+        return {}
     }
     const view = await prView(run, worktree, branch)
-    if (!view || view.baseRefName === "") {
-        return undefined
+    if (!view) {
+        return {}
     }
-    return view.baseRefName
+    return {
+        ...(view.baseRefName !== "" ? { base: view.baseRefName } : {}),
+        pr: view.url
+    }
 }

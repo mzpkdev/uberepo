@@ -1956,9 +1956,15 @@ describe("open command", () => {
                 })
             })
 
-            // The discovered PR base is persisted alongside the adopted branch.
+            // The discovered PR base AND url are persisted alongside the
+            // adopted branch (status reads the pr link offline).
             expect(await readBranches("alpha")).toEqual({
-                api: { name: "feature/x", adopted: true, base: "develop" }
+                api: {
+                    name: "feature/x",
+                    adopted: true,
+                    base: "develop",
+                    pr: "https://github.com/acme/api/pull/5"
+                }
             })
         })
 

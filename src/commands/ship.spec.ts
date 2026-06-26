@@ -9,6 +9,7 @@ import { vi } from "vitest"
 import ship from "@/commands/ship"
 import { CONFIG_FILENAME } from "@/config"
 import { type Gh, GhError, resetGh, setGh } from "@/forge"
+import { parse } from "@/ubertask"
 
 const exec = promisify(execFile)
 
@@ -799,6 +800,100 @@ describe("ship command", () => {
                 status: "shipped"
             }
         ])
+    })
+
+    // ── PR url persisted into the note (status reads it offline) ──
+
+    describe("persists the PR url into ubertask.yml", () => {
+        // Read the task note's parsed branches: map off disk.
+        const readBranches = async (
+            task: string
+        ): Promise<
+            Record<
+                string,
+                { name: string; adopted: boolean; base?: string; pr?: string }
+            >
+        > => {
+            const file = path.join(root, "tasks", task, "ubertask.yml")
+            return parse(await fsp.readFile(file, "utf8")).branches
+        }
+
+        it("records a created participant's PR url with name + adopted:false (materialized)", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await commitWork(await openWorktree("api", "alpha"))
+            // open seeds the note; here just stamp a minimal one (no branches:).
+            await writeNote("alpha", "goal: |\n  g\n")
+            const gh = makeGh({
+                createUrl: { api: "https://github.com/acme/api/pull/42" }
+            })
+            setGh(gh.run)
+
+            await captureJson<ShipJson>(async () => {
+                await ship.run(argv())
+            })
+
+            // The default-branch participant had no entry, so ship materialized
+            // one to hold the pr: the resolved branch name, adopted:false, pr.
+            expect(await readBranches("alpha")).toEqual({
+                api: {
+                    name: "task/alpha",
+                    adopted: false,
+                    pr: "https://github.com/acme/api/pull/42"
+                }
+            })
+        })
+
+        it("stamps the pr onto an existing adopted entry without losing base/adopted", async () => {
+            await makeSource("api")
+            await register(["api"])
+            // The worktree is on the adopted branch the note records.
+            const source = path.join(root, "source", "api")
+            const wt = path.join(root, "tasks", "alpha", "api")
+            await sh(source, "worktree", "add", "-b", "feature/x", wt, "main")
+            await commitWork(wt)
+            // A note whose api entry is an adopted branch with a recorded base
+            // (a real ref, so the ahead-of-base count resolves) and no pr yet.
+            await writeNote(
+                "alpha",
+                "goal: |\n  g\n\nbranches:\n  api:\n    name: feature/x\n    adopted: true\n    base: main\n"
+            )
+            const gh = makeGh({
+                createUrl: { api: "https://github.com/acme/api/pull/7" }
+            })
+            setGh(gh.run)
+
+            await captureJson<ShipJson>(async () => {
+                await ship.run(argv())
+            })
+
+            // name/adopted/base preserved; pr added.
+            expect(await readBranches("alpha")).toEqual({
+                api: {
+                    name: "feature/x",
+                    adopted: true,
+                    base: "main",
+                    pr: "https://github.com/acme/api/pull/7"
+                }
+            })
+        })
+
+        it("writes nothing under --no-pr (no pr to persist)", async () => {
+            await makeSource("api")
+            await register(["api"])
+            await commitWork(await openWorktree("api", "alpha"))
+            const before = "goal: |\n  g\n"
+            await writeNote("alpha", before)
+            setGh(makeGh().run)
+
+            await captureJson<ShipJson>(async () => {
+                await ship.run(argv({ "no-pr": true }))
+            })
+
+            // No PR opened → the hand-written note bytes are left untouched.
+            const file = path.join(root, "tasks", "alpha", "ubertask.yml")
+            expect(await fsp.readFile(file, "utf8")).toBe(before)
+        })
     })
 
     describe("hooks", () => {
