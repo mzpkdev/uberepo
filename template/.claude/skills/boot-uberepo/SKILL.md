@@ -1,13 +1,12 @@
 ---
 name: boot-uberepo
-description: One-time setup for a fresh uberepo workspace — fill in AGENTS.md from the cloned repos and wire the hooks that bootstrap each task worktree. Run explicitly via /boot-uberepo.
+description: One-time setup of a fresh uberepo workspace — inspect the cloned repos, fill in AGENTS.md, and wire the bootstrap hooks. Fires only while AGENTS.md still shows the UBEREPO:UNCONFIGURED marker (or on /boot-uberepo); once configured, defer to using-uberepo.
 user-invocable: true
-disable-model-invocation: true
 ---
 
 # Boot a uberepo workspace
 
-One-time configuration for a fresh workspace, run by hand via `/boot-uberepo`. You
+One-time configuration for a fresh workspace, triggered while its `AGENTS.md` still shows the `UBEREPO:UNCONFIGURED` marker (or via `/boot-uberepo`). You
 inspect the repos in `source/`, write the workspace `AGENTS.md`, and wire the hooks
 that make every future `uberepo open` land a ready-to-run worktree — then strip the
 unconfigured banner so this never needs running again. You do NOT open tasks, commit,

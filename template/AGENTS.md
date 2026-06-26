@@ -1,10 +1,13 @@
-<!-- UBEREPO:UNCONFIGURED — this AGENTS.md is still the scaffold. Each section below
-     has an HTML-comment prompt describing what to fill. Once filled, delete those
-     prompts, this marker, and the banner. Running /boot-uberepo does it for you. -->
+<!-- UBEREPO:UNCONFIGURED — REQUIRED ACTION, DO NOT IGNORE. This AGENTS.md is an UNFILLED
+     scaffold. If you are an AI agent, you MUST run /boot-uberepo before doing any real work in
+     this workspace — it inspects the repos in source/ and fills every section below. You MUST
+     fill EVERY "Fill:" section, ALWAYS from the real repos in source/, and you MUST NEVER invent,
+     guess, or keep the example rows. When every section is filled you MUST delete all "Fill:"
+     comments, this marker, AND the banner. NEVER leave this file half-configured. -->
 
 > [!IMPORTANT]
-> **This workspace isn't configured yet.** Run **`/boot-uberepo`** to fill in the
-> sections below, then delete this banner.
+> **This workspace is NOT configured.** You MUST run **`/boot-uberepo`** before working here —
+> it fills the sections below from the real repos. Do this FIRST, then delete this banner.
 
 # Working in this uberepo workspace
 
@@ -47,22 +50,26 @@ in `.claude/skills/` carries the full lifecycle (open → sync → close), recov
 
 ## Repositories
 
-<!-- Fill: one row per repo — what each is.  e.g. | api | REST backend — owns auth + billing | -->
+<!-- REQUIRED: fill one row per repo — what each repo is. You MUST cover EVERY repo in source/
+     and MUST NEVER invent one. The example row is FORMAT ONLY — do NOT keep it. Delete this
+     comment once filled.  e.g. | api | REST backend — owns auth + billing | -->
 
 | Repo | What it is |
 | --- | --- |
 
 ## Architecture
 
-<!-- Fill: how the repos connect and how data flows. Who calls/consumes whom and over what
-     (REST, published package, shared DB/queue), who owns each contract, and the data path
-     across repos. A diagram or a few lines — whatever's clearest. -->
+<!-- REQUIRED: describe how the repos connect and how data flows — who calls/consumes whom and
+     over what (REST, published package, shared DB/queue), who owns each contract, the data path
+     across repos. You MUST ground every edge in the real code and MUST NEVER guess a connection;
+     ALWAYS ask the human for any wiring you cannot verify. Delete this comment once filled. -->
 
 ## Tooling
 
-<!-- Fill: how to bootstrap each repo — install / dev / test (write commands, not prose).
-     This is the source the hooks get wired from: install → post-open, test → pre-ship.
-     e.g. | api | npm ci | npm run dev | npm test | -->
+<!-- REQUIRED: give the bootstrap / dev / test command for EVERY repo — commands, NOT prose.
+     These are the source the hooks are wired from (install → post-open, test → pre-ship), so they
+     MUST be the real, working commands and MUST NEVER be guesses. The example row is FORMAT ONLY —
+     do NOT keep it. Delete this comment once filled.  e.g. | api | npm ci | npm run dev | npm test | -->
 
 | Repo | Bootstrap | Dev | Test |
 | --- | --- | --- | --- |
