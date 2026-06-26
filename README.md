@@ -206,5 +206,5 @@ No daemon. No database. No lock file. State lives in git (branches + worktrees),
 
 ---
 
-Requires git ≥ 2.5 (when worktrees landed). The `gh` CLI is needed only for `ship`.  
+Requires git ≥ 2.5 (when worktrees landed); `sync --check` needs git ≥ 2.38. The `gh` CLI is needed only for `ship`.  
 Licensed [MIT](LICENSE) © Mateusz Pietrzak.

@@ -18,7 +18,7 @@ or push; once booted, the `using-uberepo` skill drives the task lifecycle.
   `AGENTS.md`. If it's gone, the workspace is already configured — don't redo it; at
   most refresh one section the user names.
 - `uberepo sources --json` for the registered repos and their clone state. Note up
-  front if `gh` is missing (`ship` needs it later) or git is older than 2.5.
+  front if `gh` is missing (`ship` needs it later) or git is older than 2.38 (worktrees need 2.5, `sync --check` needs 2.38).
 - No `AGENTS.md` at all (workspace was `init --no-agents`)? Wire the hooks/carry and
   skip the fill.
 
